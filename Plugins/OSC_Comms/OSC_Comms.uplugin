@@ -1,0 +1,17 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "OSCulator",
+	"Description": "OSC+MIDI configuration and routing plugin",
+	"Category": "Other",
+	"CreatedBy": "Baron Lanteigne",
+	"CreatedByURL": "https://www.baronlanteigne.com/",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/baronlanteigne/newOSC55",
+	"EngineVersion": "5.6.0",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"Installed": true
+}
