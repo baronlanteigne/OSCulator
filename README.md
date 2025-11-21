@@ -5,6 +5,8 @@ It simplifies the parsing and routing of incoming messages, straight to the acto
 
 This repository comes with a demo project and a simple TouchDesigner patch controlling it.
 
+Your ideas, suggestions and any kind of contributions are welcome. Discuss the plugin here: https://discord.gg/cjUawK65PY
+
 ### Requirements
 - LTween interpolation plugin: https://www.fab.com/listings/1dbb1791-152d-4581-8c0e-32faccabfbf2
 - OSC official plugin by Epic (already comes with UE)
