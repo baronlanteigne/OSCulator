@@ -12,7 +12,8 @@ It simplifies the parsing and routing of incoming messages, straight to the acto
 - Enable the required plugins.
 - Add the OSC_Init and MIDI_Init components to your Game Mode.
 - Configure a OSC and/or MIDI server, the parameters are on the OSC_Init and MIDI_Init components respectively.
-- In the actor you want to control, add one or more of the component:
+- In the actor you want to control, add the BPI_MIDI_OSC as an Interface in the Class Settings.
+- Also add one or more of the components:
   - OSC_Receiver
   - OSC_Sender
   - MIDI_Receiver
