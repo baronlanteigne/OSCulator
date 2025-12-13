@@ -5,6 +5,10 @@
 			"guid": "00000000000000000000000000000000",
 			"description": "Default Uncontrolled Changelist",
 			"files": [
+				"A:/_UE/OSCulator/Plugins/OSC_Comms/Content/Components/Blueprints/OSC_Sender.uasset",
+				"A:/_UE/OSCulator/Plugins/OSC_Comms/Content/Components/Blueprints/MIDI_Receiver.uasset",
+				"A:/_UE/OSCulator/Plugins/OSC_Comms/Content/Components/Blueprints/BPI_MIDI_OSC.uasset",
+				"A:/_UE/OSCulator/Plugins/OSC_Comms/Content/Components/Blueprints/MIDI_Sender.uasset",
 				"A:/_UE/OSCulatorDemoProject/Plugins/OSC_Comms/Content/__ExternalActors__/Demo/NewMap/F/3G/Z2K1SGJQYBYVL0WHD460R4.uasset",
 				"A:/_UE/OSCulatorDemoProject/Plugins/OSC_Comms/Content/__ExternalActors__/Demo/NewMap/E/XS/48WO3F8DIDYUTG9W638GVY.uasset",
 				"A:/_UE/OSCulatorDemoProject/Plugins/OSC_Comms/Content/__ExternalActors__/Demo/NewMap/E/QA/DB2OEYJ7RVOBKCRGKCDF63.uasset",
