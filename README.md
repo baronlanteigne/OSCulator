@@ -34,5 +34,14 @@ This repository includes a demo Unreal 5.6 project and a simple TouchDesigner pa
 
 --> Check the provided .toe file for an example of how to format the OSC messages to use the interp plugin.
 
-### Contributors:
+### Contributors
 - Dani Kolgan
+
+### Special Thanks
+- Eusebi Jucgla
+
+### Other resources / Similar projects
+- [https://eusebijucgla.com/](https://www.eusebijucgla.com/)
+- https://mistaudio.com/tutorials/ue-live/
+- https://www.youtube.com/@semandtrisavclub4962
+- ...
