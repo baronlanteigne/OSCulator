@@ -5,6 +5,8 @@ It parses and routes the incoming messages, straight to the actor you want to in
 It is intended for artists trying to bridge their existing workflows with an Unreal Engine scene.
 I am currently using this system to enable bi directional communications between Ableton Live, TouchDesigner and Unreal.
 
+quick demo of my wip using this thing in multiple ways: https://www.youtube.com/shorts/pdM36UnySpw
+
 This repository includes a demo Unreal 5.6 project and a simple TouchDesigner patch controlling it but works with any other software using MIDI and OSC.
 
 #### Your ideas, suggestions and any kind of contributions are welcome.
