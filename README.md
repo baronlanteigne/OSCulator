@@ -7,22 +7,24 @@ I am currently using this system to enable bi directional communications between
 
 quick demo of my wip using this thing in multiple ways: https://youtube.com/shorts/3rbzkUMAiUI
 
-This repository includes a demo Unreal 5.6 project and a simple TouchDesigner patch controlling it but works with any other software using MIDI and OSC.
+This repository includes a demo **Unreal 5.6 project** and a simple TouchDesigner patch controlling it but works with any other software using MIDI and OSC.
 
 #### Your ideas, suggestions and any kind of contributions are welcome.
 #### Discuss the plugin here: https://discord.gg/cjUawK65PY
 
 ### Requirements
 - Basic Unreal Engine knowledge: install a plugin, create blueprint networks, build basic logic using blueprint.
-- LTween interpolation plugin: https://www.fab.com/listings/1dbb1791-152d-4581-8c0e-32faccabfbf2
-- OSC official plugin by Epic (already comes with UE)
-- MIDI Device Support official plugin by Epic (already comes with UE)
+- **Unreal Engine 5.6**
+- **LTween** interpolation plugin: https://www.fab.com/listings/1dbb1791-152d-4581-8c0e-32faccabfbf2
 
 ### Installation & Usage
-- Enable the required plugins.
-- Add the OSC_Init and MIDI_Init components to your Game Mode.
+- Enable the following plugins:
+  - LTween
+  - OSC (official plugin comes with Unreal Engine)
+  - MIDI (official plugin, comes with UE)
+- Use the GameMode file from the demo project. It contains the MIDI_Init and OSC_Init components.
 - Configure a OSC and/or MIDI server, the parameters are on the OSC_Init and MIDI_Init components respectively.
-- In the actor you want to control, add the BPI_MIDI_OSC as an Interface in the Class Settings.
+- In the actor you want to control, add the BPI_MIDI_OSC as an BPI Interface in the Class Settings.
 - Also add one or more of the components:
   - OSC_Receiver
   - OSC_Sender
