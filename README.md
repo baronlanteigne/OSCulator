@@ -52,4 +52,5 @@ This repository includes a demo **Unreal 5.6 project** and a simple TouchDesigne
 - https://mistaudio.com/tutorials/ue-live/
 - https://www.youtube.com/@semandtrisavclub4962
 - Ableton M4L Devices for OSC: https://www.fragmentflow.com/tools-and-other-downloads/
+- [Yu Fujishiro]([url](https://www.youtube.com/yfjsr))
 - ...
