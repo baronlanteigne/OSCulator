@@ -20,23 +20,32 @@ This repository includes a demo **Unreal 5.6 project** and a simple TouchDesigne
 - **LTween** interpolation plugin: https://www.fab.com/listings/1dbb1791-152d-4581-8c0e-32faccabfbf2
 
 ### Installation & Usage
+
 - Enable the following plugins:
   - LTween
   - OSC (official plugin comes with Unreal Engine)
   - MIDI (official plugin, comes with UE)
-- Use the GameMode file from the demo project. It contains the MIDI_Init and OSC_Init components.
-- Configure a OSC and/or MIDI server, the parameters are on the OSC_Init and MIDI_Init components respectively.
-- In the actor you want to control, add the BPI_MIDI_OSC as an BPI Interface in the Class Settings.
-- Also add one or more of the components:
-  - OSC_Receiver
-  - OSC_Sender
-  - MIDI_Receiver
-  - MIDI_Sender
+    
+- Edit BP_GameMode to access OSC_Init and MIDI_Init, or add those components to your own Game Mode.
+  
+- Configure a OSC and/or MIDI server:
+    - OSC_Init needs your local IP and ports for OSC communication.
+    - MIDI_Init needs the name of the midi devices you want to use. (I use LoopMIDI for virtual ports)
 
-    These components let you send and receive messages from within the Actor BP they are added to.
-    The tag on the actor lets you set the osc address used to control that actor.
-    If two actors share a tag, they both receive the osc messages.
+- See Test_Cube in the demo project as an example of how to setup your actor.
+      
+  - In the actor you want to control, add the BPI_MIDI_OSC as an BPI Interface in the Class Settings.  
+  - Also add one or more of the components:
+    - OSC_Receiver
+    - OSC_Sender
+    - MIDI_Receiver
+    - MIDI_Sender
 
+      These components let you send and receive messages from within the Actor BP they are added to.
+      The tag on the actor lets you set the osc address used to control that actor.
+      If two actors share a tag, they both receive the osc messages.
+
+### Demo Project
 --> Check the demo Level, GameMode and Test_Cube Actor in the Demo folder in the plugin for an example.
 
 --> Check the provided .toe file for an example of how to format the OSC messages to use the interp plugin.
@@ -53,4 +62,5 @@ This repository includes a demo **Unreal 5.6 project** and a simple TouchDesigne
 - https://www.youtube.com/@semandtrisavclub4962
 - Ableton M4L Devices for OSC: https://www.fragmentflow.com/tools-and-other-downloads/
 - [Yu Fujishiro]([url](https://www.youtube.com/yfjsr))
+- [LoopMIDI]([url](https://www.tobias-erichsen.de/software/loopmidi.html))
 - ...
