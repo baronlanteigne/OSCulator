@@ -1,8 +1,10 @@
-# UE OSCulator
+# UE OSCulator 5.6
 UE OSCulator is a OSC + MIDI plugin for Unreal Engine designed to simplify the integration of external controlling software within Unreal Engine.
 It parses and routes the incoming messages, straight to the actor you want to interact with.
-It is intended for artists who are trying to bridge their existing workflows in another software with an Unreal Engine scene.
-I am currently using this system to enable bi directional communications between Ableton Live, TouchDesigner and Unreal.
+
+This version was built in 5.6 using Blueprints. The system was fully tested to work in 5.7 and 5.8.
+
+This version is archived here as reference but will not be updated.
 
 ### [setup video](https://youtu.be/J3UqybmT_OA)
 
