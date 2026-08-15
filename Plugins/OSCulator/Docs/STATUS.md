@@ -1,6 +1,6 @@
 # OSCulator — Build Status
 
-**As of 2026-08-14. All seven phases built. 31 automation tests green.**
+**As of 2026-08-15. All seven phases built. 35 automation tests green.**
 
 Run the suite headless:
 
@@ -84,6 +84,16 @@ with auto note-off scheduling, and OSC self-describe on `/_describe`.
 floats, wire-channel conversion round trip, note-off scheduling and flushing,
 describe reply shape.
 
+### Helper nodes
+Blueprint nodes layered on top that have nothing to do with OSC or MIDI — they
+interpret values after delivery, so any transport can feed them. `UOscuMaterialLibrary`
+with `Resolve Material Parameter Value`, which splits a variable-length float array
+into a scalar or a colour so one event drives both material setters. See
+[HELPERS.md](HELPERS.md).
+
+*Tests:* every length from 0 to 6, alpha defaulting to opaque, outputs cleared on the
+branch not taken, and end to end through a trailing-array signature.
+
 ---
 
 ## Verified by hand
@@ -133,6 +143,17 @@ re-running `stat OSCulator` at that scale before calling performance settled.
 Known candidates if it ever gets uncomfortable, none currently justified:
 `DispatchMessage` allocates per message via `Address.ParseIntoArray` and builds a
 `TMap<UClass*, TArray<AActor*>>` per call. Both could use reusable scratch buffers.
+
+---
+
+## Noted for later
+
+Wanted, not yet requested. Do not build without asking.
+
+| Idea | Notes |
+| --- | --- |
+| A 7-value transform | loc3, rot3, then **one** scale value used for all three axes. Alongside the 9-value form, not replacing it |
+| MIDI increment | A value that steps on each subsequent MIDI trigger, rather than every hit sending the same thing |
 
 ---
 
