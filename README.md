@@ -59,10 +59,9 @@ fifth.
 The whole test project, so the plugin has somewhere to be exercised:
 
 ```
-Plugins/OSCulator/        the plugin — this is the portable part
+Plugins/OSCulator/                the plugin — this is the portable part
 Content/0_OSCulatorDemoProject/   demo map, BP_Laser, a MIDI map asset
-TouchDesignerDemo/        a TouchDesigner patch to drive it
-Source/                   the host project module
+Source/                           the host project module
 ```
 
 Only `Plugins/OSCulator` is needed in your own project.
