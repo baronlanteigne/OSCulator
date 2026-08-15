@@ -25,7 +25,7 @@ bi-directional interaction between multiple tools.
 **Get Started Tutorial: https://youtu.be/gXMZ8Na-vls**
 
 1. Copy `Plugins/OSCulator` into your project and build.
-2. Tag an actor `OSC_laser` in **Actor → Tags**.
+2. Tag an actor `OSC_cube` in **Actor → Tags**.
 3. Play, then in the console: `OSCulator.List Custom` to see what is callable.
 4. Send real OSC to **port 8000**. See the demo TouchDesigner project to start testing.
 
