@@ -3,22 +3,6 @@
 OSCulator is an OSC + MIDI plugin for Unreal Engine, designed to simplify
 bi-directional interaction between multiple tools.
 
-## What it does
-
-This version is incomplete but here's the main feature: run any function on any actor by sending an osc msg.
-No per-actor wiring. No parser. No manager to build.
-
-In this example project: BP_Laser has tag "OSC_laser" which makes it reachable via the "/laser/" address.
-It has function "Fire".
-
-Send `"/laser/Fire" [0, 0, 1, "burst", 0.5]` to run it.
-
-**The function signature is the schema.** The sender declares no types — it sends the
-right count of values in the right order, and the receiving signature decides what
-they mean. Given `Fire(FVector Dir, FName Mode, float Power)`, five incoming values
-become a vector from the first three, a name from the fourth, and a float from the
-fifth.
-
 ## Key features
 
 - **Call any Blueprint event over OSC or MIDI** by tagging its actor. Several actors
@@ -38,11 +22,12 @@ fifth.
 
 ## Quick start
 
+Get Started Tutorial: https://youtu.be/gXMZ8Na-vls
+
 1. Copy `Plugins/OSCulator` into your project and build.
 2. Tag an actor `OSC_laser` in **Actor → Tags**.
 3. Play, then in the console: `OSCulator.List Custom` to see what is callable.
-4. Test without a sender: `OSCulator.Send /laser/Fire 0 0 1 burst 0.5`
-5. Send real OSC to **port 8000**. `OSCulator.Status` shows what arrived.
+4. Send real OSC to **port 8000**. See the demo TouchDesigner project to start testing.
 
 ## Documentation
 
