@@ -5,11 +5,13 @@ bi-directional interaction between multiple tools.
 
 ## What it does
 
-Tag an actor `OSC_laser`. Send `/laser/Fire 0 0 1 burst 0.5` from TouchDesigner, Max
-or Ableton. OSCulator finds every actor carrying that tag, reads `Fire`'s parameter
-list by reflection, and fills it from the message in order.
-
+This version is incomplete but here's the main feature: run any function on any actor by sending an osc msg.
 No per-actor wiring. No parser. No manager to build.
+
+In this example project: BP_Laser has tag "OSC_laser" which makes it reachable via the "/laser/" address.
+It has function "Fire".
+
+Send `"/laser/Fire" [0, 0, 1, "burst", 0.5]` to run it.
 
 **The function signature is the schema.** The sender declares no types — it sends the
 right count of values in the right order, and the receiving signature decides what
