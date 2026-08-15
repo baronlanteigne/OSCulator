@@ -3,10 +3,6 @@
 OSCulator is an OSC + MIDI plugin for Unreal Engine, designed to simplify
 bi-directional interaction between multiple tools.
 
-**Unreal Engine 5.8.** Licensed GPL-3.0.
-
----
-
 ## What it does
 
 Tag an actor `OSC_laser`. Send `/laser/Fire 0 0 1 burst 0.5` from TouchDesigner, Max
