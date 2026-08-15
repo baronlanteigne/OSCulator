@@ -22,7 +22,7 @@ bi-directional interaction between multiple tools.
 
 ## Quick start
 
-Get Started Tutorial: https://youtu.be/gXMZ8Na-vls
+**Get Started Tutorial: https://youtu.be/gXMZ8Na-vls**
 
 1. Copy `Plugins/OSCulator` into your project and build.
 2. Tag an actor `OSC_laser` in **Actor → Tags**.
