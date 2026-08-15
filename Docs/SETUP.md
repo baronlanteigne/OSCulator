@@ -74,6 +74,43 @@ calling it with an arbitrary integer jumps into the middle of your graph.
 
 Use `OSCulator.List Custom` to see just your own Blueprint events.
 
+### Parameter types
+
+What each parameter type costs on the wire. Values are consumed in order.
+
+| Type | Values | Order |
+| --- | --- | --- |
+| float, int, bool, byte | 1 | |
+| string, name, text | 1 | |
+| enum | 1 | index or name |
+| vec2 | 2 | x, y |
+| vec3 | 3 | x, y, z |
+| rotator | 3 | pitch, yaw, roll |
+| color | 4 | r, g, b, a |
+| quat | 4 | x, y, z, w |
+| transform | 9 | loc3, rot3, scale3 |
+| array | all remaining | |
+
+A parameter of any other type — an object reference, an unlisted struct — excludes the
+whole function from the registry. `OSCulator.List` prints each signature with these
+labels, so it always agrees with what the marshaller will do.
+
+### Variable-length messages
+
+A **trailing array** parameter swallows every argument the fixed parameters did not
+take, so one event can serve messages of different lengths:
+
+```
+MatParam(FName ParamName, float Interp, TArray<float> Value)
+           └─ arg 0        └─ arg 1      └─ args 2..n
+```
+
+The array must be the **last** parameter, and there can be only one. A parameter after
+an array is rejected at registration, since the split would be ambiguous. The element
+type must cost one value, so `TArray<float>` works and `TArray<FVector>` does not.
+
+See [HELPERS.md](HELPERS.md) for nodes that interpret the array once it arrives.
+
 ---
 
 ## 3. OSC input
