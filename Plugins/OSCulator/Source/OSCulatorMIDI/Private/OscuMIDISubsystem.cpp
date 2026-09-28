@@ -4,6 +4,7 @@
 
 #include "OSCulatorCore.h"
 #include "OscuMIDINoteName.h"
+#include "OscuMIDIPort.h"
 #include "OscuMarshal.h"
 #include "OscuRouterSubsystem.h"
 #include "OscuSettings.h"
@@ -11,7 +12,6 @@
 
 #include "Engine/Engine.h"
 #include "Engine/World.h"
-#include "MIDIDeviceInputController.h"
 #include "MIDIDeviceManager.h"
 #include "MIDIDeviceOutputController.h"
 
@@ -91,6 +91,15 @@ UOscuMIDISubsystem* UOscuMIDISubsystem::Get()
 	return GEngine != nullptr ? GEngine->GetEngineSubsystem<UOscuMIDISubsystem>() : nullptr;
 }
 
+void UOscuMIDISubsystem::SetActiveMap(UOscuMIDIMap* Map)
+{
+	ActiveMaps.Reset();
+	if (Map != nullptr)
+	{
+		ActiveMaps.Add(Map);
+	}
+}
+
 void UOscuMIDISubsystem::Restart()
 {
 	// Release anything sounding before the devices go away underneath it.
@@ -100,7 +109,22 @@ void UOscuMIDISubsystem::Restart()
 	CloseOutputs();
 
 	OpenDevices();
-	OpenOutputs();
+
+	const UOscuSettings& Settings = *UOscuSettings::Get();
+
+	// Only the output side still goes through the engine's device manager, and only
+	// output pays for its enumeration -- which terminates and restarts the engine's
+	// PortMidi copy every time it is called. Our input ports are a separate instance
+	// and are not disturbed by it, which is the whole reason they are a separate
+	// instance.
+	TArray<FMIDIDeviceInfo> OutputDevices;
+	if (Settings.bEnableMIDIOut && !IsRunningCommandlet() && !FApp::IsUnattended())
+	{
+		TArray<FMIDIDeviceInfo> InputDevices;
+		UMIDIDeviceManager::FindAllMIDIDeviceInfo(InputDevices, OutputDevices);
+	}
+
+	OpenOutputs(OutputDevices);
 }
 
 int32 UOscuMIDISubsystem::ToWireChannel(int32 Channel)
@@ -108,7 +132,7 @@ int32 UOscuMIDISubsystem::ToWireChannel(int32 Channel)
 	return FMath::Clamp(Channel, 1, 16) - 1;
 }
 
-void UOscuMIDISubsystem::OpenOutputs()
+void UOscuMIDISubsystem::OpenOutputs(const TArray<FMIDIDeviceInfo>& OutputDevices)
 {
 	const UOscuSettings& Settings = *UOscuSettings::Get();
 	if (!Settings.bEnableMIDIOut)
@@ -127,10 +151,6 @@ void UOscuMIDISubsystem::OpenOutputs()
 			TEXT("MIDI output is enabled but no device names are listed in Project Settings > Plugins > OSCulator."));
 		return;
 	}
-
-	TArray<FMIDIDeviceInfo> InputDevices;
-	TArray<FMIDIDeviceInfo> OutputDevices;
-	UMIDIDeviceManager::FindAllMIDIDeviceInfo(InputDevices, OutputDevices);
 
 	for (const FString& Wanted : Settings.MIDIOutputDeviceNames)
 	{
@@ -174,8 +194,10 @@ void UOscuMIDISubsystem::CloseOutputs()
 		if (Output.Controller != nullptr)
 		{
 			// Same as the input side: the port is only released on shutdown, not on
-			// losing the last reference.
+			// losing the last reference, and a closed controller still has to be
+			// marked or the engine will restart it out from under us.
 			Output.Controller->ShutdownDevice();
+			Output.Controller->MarkAsGarbage();
 		}
 	}
 	Outputs.Reset();
@@ -278,6 +300,10 @@ void UOscuMIDISubsystem::FlushPendingNoteOffs()
 
 bool UOscuMIDISubsystem::Tick(float DeltaTime)
 {
+	// Input first. A note read this frame gets dispatched this frame, and if it was
+	// scheduled with a duration its release is queued below in the same pass.
+	DrainPorts();
+
 	if (PendingNoteOffs.Num() > 0)
 	{
 		const double Now = FPlatformTime::Seconds();
@@ -315,15 +341,39 @@ void UOscuMIDISubsystem::OpenDevices()
 		return;
 	}
 
-	ActiveMap = Cast<UOscuMIDIMap>(Settings.MIDIMap.TryLoad());
-	if (ActiveMap == nullptr && Settings.MIDIMap.IsValid())
+	// Every configured map, all of them live at once. One that will not load is named
+	// and skipped rather than taking the others down with it.
+	ActiveMaps.Reset();
+	for (const FSoftObjectPath& Path : Settings.MIDIMaps)
 	{
-		UE_LOG(LogOSCulator, Warning, TEXT("MIDI map '%s' could not be loaded."), *Settings.MIDIMap.ToString());
+		if (!Path.IsValid())
+		{
+			continue;
+		}
+
+		UOscuMIDIMap* Map = Cast<UOscuMIDIMap>(Path.TryLoad());
+		if (Map == nullptr)
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("MIDI map '%s' could not be loaded."), *Path.ToString());
+			continue;
+		}
+
+		ActiveMaps.Add(Map);
 	}
-	else if (ActiveMap == nullptr)
+
+	if (ActiveMaps.Num() == 0)
 	{
 		UE_LOG(LogOSCulator, Warning,
-			TEXT("MIDI input is enabled but no map asset is set in Project Settings > Plugins > OSCulator. Notes will arrive and go nowhere."));
+			TEXT("MIDI input is enabled but no map asset is set in Project Settings > Plugins > OSCulator. MIDI will arrive and go nowhere."));
+	}
+	else
+	{
+		for (const TObjectPtr<UOscuMIDIMap>& Map : ActiveMaps)
+		{
+			UE_LOG(LogOSCulator, Log, TEXT("MIDI map loaded: '%s' (%d binding(s)%s)."),
+				*Map->GetName(), Map->Bindings.Num(),
+				Map->DefaultDevice.IsNone() ? TEXT("") : *FString::Printf(TEXT(", device '%s'"), *Map->DefaultDevice.ToString()));
+		}
 	}
 
 	if (Settings.MIDIInputDeviceNames.Num() == 0)
@@ -333,90 +383,85 @@ void UOscuMIDISubsystem::OpenDevices()
 		return;
 	}
 
-	TArray<FMIDIDeviceInfo> InputDevices;
-	TArray<FMIDIDeviceInfo> OutputDevices;
-	UMIDIDeviceManager::FindAllMIDIDeviceInfo(InputDevices, OutputDevices);
+	const int32 FilterMask = OscuMIDI::BuildFilterMask(Settings.MIDIInputMessages);
+	const int32 ChannelMask = CurrentChannelMask();
+	const int32 QueueSize = FMath::Clamp(Settings.MIDIInputQueueSize, 64, 16384);
 
 	// Says out loud what is about to be attempted, so "0 devices open" is never a
 	// mystery -- the reason is always the next line or two of the log.
-	UE_LOG(LogOSCulator, Log, TEXT("MIDI input: opening %d configured device(s); %d input(s) present on this machine."),
-		Settings.MIDIInputDeviceNames.Num(), InputDevices.Num());
+	UE_LOG(LogOSCulator, Log,
+		TEXT("MIDI input: opening %d configured device(s). Queue %d message(s); ignoring %s; %s."),
+		Settings.MIDIInputDeviceNames.Num(), QueueSize,
+		*OscuMIDI::DescribeFilterMask(FilterMask), *OscuMIDI::DescribeChannelMask(ChannelMask));
+
+	if (!Settings.MIDIInputMessages.bNotes)
+	{
+		// Legal, and possibly deliberate, but it switches off everything a map asset
+		// can currently address. Better said here than discovered by playing a pad and
+		// getting nothing.
+		UE_LOG(LogOSCulator, Warning,
+			TEXT("MIDI input is not listening for notes -- untick 'Notes' under Listen For to change that. No mapping can fire and Learn will not work."));
+	}
 
 	for (const FString& Wanted : Settings.MIDIInputDeviceNames)
 	{
-		// By name, never by enumeration order. Exclusivity conflicts between plugins
-		// are real, and taking whatever is first is how you end up fighting for a port.
-		const FMIDIDeviceInfo* Found = InputDevices.FindByPredicate(
-			[&Wanted](const FMIDIDeviceInfo& Info) { return Info.DeviceName.Equals(Wanted, ESearchCase::IgnoreCase); });
+		FOscuMIDIPort Port;
+		FString Error;
 
-		if (Found == nullptr)
+		if (!Port.Open(Wanted, QueueSize, FilterMask, ChannelMask, Error))
 		{
-			TArray<FString> Available;
-			for (const FMIDIDeviceInfo& Info : InputDevices)
-			{
-				Available.Add(Info.DeviceName);
-			}
-			UE_LOG(LogOSCulator, Warning, TEXT("MIDI input device '%s' was not found. Available: %s"),
-				*Wanted,
-				Available.Num() > 0 ? *FString::Join(Available, TEXT(", ")) : TEXT("(none)"));
+			// One bad device must not take the others down with it.
+			UE_LOG(LogOSCulator, Warning, TEXT("MIDI input device '%s' %s"), *Wanted, *Error);
 			continue;
 		}
 
-		if (Found->bIsAlreadyInUse)
-		{
-			// One busy device must not take the others down with it.
-			UE_LOG(LogOSCulator, Warning, TEXT("MIDI input device '%s' is already in use by another application. Skipped."), *Wanted);
-			continue;
-		}
-
-		UMIDIDeviceInputController* Controller = UMIDIDeviceManager::CreateMIDIDeviceInputController(Found->DeviceID);
-		if (Controller == nullptr)
-		{
-			UE_LOG(LogOSCulator, Warning, TEXT("MIDI input device '%s' could not be opened."), *Wanted);
-			continue;
-		}
-
-		Controller->OnMIDINoteOn.AddDynamic(this, &UOscuMIDISubsystem::HandleNoteOn);
-		Controller->OnMIDINoteOff.AddDynamic(this, &UOscuMIDISubsystem::HandleNoteOff);
-		Controllers.Add(Controller);
-
-		UE_LOG(LogOSCulator, Log, TEXT("MIDI input open: '%s' (device %d)."), *Wanted, Found->DeviceID);
+		UE_LOG(LogOSCulator, Log, TEXT("MIDI input open: '%s' (device %d)."), *Port.Name, Port.DeviceID);
+		Ports.Add(MoveTemp(Port));
 	}
 
 	UE_LOG(LogOSCulator, Log, TEXT("MIDI input: %d of %d configured device(s) opened."),
-		Controllers.Num(), Settings.MIDIInputDeviceNames.Num());
+		Ports.Num(), Settings.MIDIInputDeviceNames.Num());
+}
+
+int32 UOscuMIDISubsystem::CurrentChannelMask() const
+{
+#if WITH_EDITOR
+	// Learn has to be able to hear a channel the settings normally mute, or teaching
+	// it a note from an unlisted channel is impossible in a way nobody would guess at.
+	if (LearnMap.IsValid())
+	{
+		return 0xFFFF;
+	}
+#endif
+
+	return OscuMIDI::BuildChannelMask(UOscuSettings::Get()->MIDIInputChannels);
+}
+
+void UOscuMIDISubsystem::DrainPorts()
+{
+	for (FOscuMIDIPort& Port : Ports)
+	{
+		// The device travels with the message, because a binding may insist on one:
+		// two controllers sending the same note on the same channel are two different
+		// intentions.
+		const FName Device = Port.DeviceId;
+		Port.Drain([this, Device](const FOscuMIDIMessage& Message)
+		{
+			IngestMessage(Device, Message);
+		});
+	}
 }
 
 void UOscuMIDISubsystem::CloseDevices()
 {
-	for (TObjectPtr<UMIDIDeviceInputController>& Controller : Controllers)
+	for (FOscuMIDIPort& Port : Ports)
 	{
-		if (Controller == nullptr)
-		{
-			continue;
-		}
-
-		Controller->OnMIDINoteOn.RemoveAll(this);
-		Controller->OnMIDINoteOff.RemoveAll(this);
-
-		// Closing the port has to be explicit. Dropping the reference only queues
-		// the controller for garbage collection, and the PortMidi stream stays open
-		// until that eventually runs -- so the device keeps being held long after
-		// OSCulator has stopped using it, and no other application can take it.
-		// ShutdownDevice is null-guarded, so the destructor calling it again is fine.
-		Controller->ShutdownDevice();
+		// Explicit, and before the array is emptied. A PortMidi stream is not a
+		// managed resource: drop the last reference to it and the port stays held for
+		// the life of the process, so no other application can take it.
+		Port.Close();
 	}
-	Controllers.Reset();
-}
-
-void UOscuMIDISubsystem::HandleNoteOn(UMIDIDeviceInputController* Controller, int32 Timestamp, int32 Channel, int32 Note, int32 Velocity)
-{
-	IngestNote(Channel, Note, Velocity, /*bNoteOn*/ true);
-}
-
-void UOscuMIDISubsystem::HandleNoteOff(UMIDIDeviceInputController* Controller, int32 Timestamp, int32 Channel, int32 Note, int32 Velocity)
-{
-	IngestNote(Channel, Note, Velocity, /*bNoteOn*/ false);
+	Ports.Reset();
 }
 
 UWorld* UOscuMIDISubsystem::FindDispatchWorld() const
@@ -462,34 +507,51 @@ UWorld* UOscuMIDISubsystem::FindDispatchWorld() const
 
 #if WITH_EDITOR
 
-void UOscuMIDISubsystem::ArmLearn(UOscuMIDIMap* Map, int32 ChannelIndex, int32 NoteIndex)
+void UOscuMIDISubsystem::ArmLearn(UOscuMIDIMap* Map, const int32 BindingIndex, const int32 SourceIndex)
 {
 	LearnMap = Map;
-	LearnChannelIndex = ChannelIndex;
-	LearnNoteIndex = NoteIndex;
+	LearnBindingIndex = BindingIndex;
+	LearnSourceIndex = SourceIndex;
 
-	if (Controllers.Num() == 0)
+	// Lifted for the duration, so an input can be learned from a channel the settings
+	// normally drop at the port. Restored in CancelLearn.
+	for (FOscuMIDIPort& Port : Ports)
+	{
+		Port.SetChannelMask(0xFFFF);
+	}
+
+	if (Ports.Num() == 0)
 	{
 		UE_LOG(LogOSCulator, Warning,
 			TEXT("Learn is armed, but no MIDI device is open. Check the device list in Project Settings > Plugins > OSCulator."));
 	}
 	else
 	{
-		UE_LOG(LogOSCulator, Log, TEXT("Learn armed. Play a note."));
+		UE_LOG(LogOSCulator, Log, TEXT("Learn armed. Play a note or turn a knob."));
 	}
 }
 
 void UOscuMIDISubsystem::CancelLearn(const UOscuMIDIMap* Map)
 {
-	if (LearnMap.Get() == Map)
+	if (LearnMap.Get() != Map)
 	{
-		LearnMap.Reset();
-		LearnChannelIndex = INDEX_NONE;
-		LearnNoteIndex = INDEX_NONE;
+		return;
+	}
+
+	LearnMap.Reset();
+	LearnBindingIndex = INDEX_NONE;
+	LearnSourceIndex = INDEX_NONE;
+
+	// Back to whatever the settings asked for, now that nothing is listening for a
+	// stray channel.
+	const int32 Mask = CurrentChannelMask();
+	for (FOscuMIDIPort& Port : Ports)
+	{
+		Port.SetChannelMask(Mask);
 	}
 }
 
-bool UOscuMIDISubsystem::ApplyLearn(int32 Channel, int32 Note)
+bool UOscuMIDISubsystem::ApplyLearn(const FName Device, const FOscuMIDIMessage& Message)
 {
 	UOscuMIDIMap* Map = LearnMap.Get();
 	if (Map == nullptr)
@@ -497,44 +559,52 @@ bool UOscuMIDISubsystem::ApplyLearn(int32 Channel, int32 Note)
 		return false;
 	}
 
-	// The asset can be edited while a row sits armed, so the indices are re-checked
+	// The asset can be edited while a source sits armed, so the indices are re-checked
 	// rather than trusted.
-	if (!Map->Channels.IsValidIndex(LearnChannelIndex))
+	if (!Map->Bindings.IsValidIndex(LearnBindingIndex))
 	{
 		CancelLearn(Map);
 		return false;
 	}
-	FOscuMIDIChannelMap& ChannelMap = Map->Channels[LearnChannelIndex];
+	FOscuMIDIBinding& Binding = Map->Bindings[LearnBindingIndex];
 
-	if (!ChannelMap.Notes.IsValidIndex(LearnNoteIndex))
+	if (!Binding.Sources.IsValidIndex(LearnSourceIndex))
 	{
 		CancelLearn(Map);
 		return false;
 	}
-	FOscuMIDINoteMap& NoteMap = ChannelMap.Notes[LearnNoteIndex];
+	FOscuMIDISource& Source = Binding.Sources[LearnSourceIndex];
 
-	const int32 MiddleCOctave = UOscuSettings::Get()->MiddleCOctave;
-	NoteMap.ResolvedNote = static_cast<uint8>(Note);
-	NoteMap.Note = OscuMIDINoteName::ToString(static_cast<uint8>(Note), MiddleCOctave);
-	NoteMap.bLearn = false;
+	// Everything about the gesture, not just which note it was. Filling in the device
+	// and the channel by hand afterwards is exactly the tedium Learn exists to remove.
+	Source.Device = Device;
+	Source.Channel = static_cast<uint8>(Message.Channel);
+	Source.Type = Message.Type;
+	Source.bLearn = false;
 
-	if (ChannelMap.Channel != Channel)
+	if (Message.Type == EOscuMIDIInputType::Note)
 	{
-		// Deliberately not "corrected" -- moving the row would move its siblings too.
-		UE_LOG(LogOSCulator, Warning,
-			TEXT("Learned note %s arrived on channel %d, but this row sits under channel %d. The note was written; change the channel yourself if that was not intended."),
-			*NoteMap.Note, Channel, ChannelMap.Channel);
+		const int32 MiddleCOctave = UOscuSettings::Get()->MiddleCOctave;
+		Source.ResolvedNote = static_cast<uint8>(Message.Number);
+		Source.Note = OscuMIDINoteName::ToString(static_cast<uint8>(Message.Number), MiddleCOctave);
+	}
+	else
+	{
+		Source.ControlNumber = static_cast<uint8>(Message.Number);
 	}
 
-	UE_LOG(LogOSCulator, Log, TEXT("Learned %s (note %d) for '%s'."),
-		*NoteMap.Note, Note, *NoteMap.FunctionName.ToString());
+	UE_LOG(LogOSCulator, Log, TEXT("Learned %s on channel %d for %s/%s."),
+		Message.Type == EOscuMIDIInputType::Note
+			? *FString::Printf(TEXT("note %s (%d)"), *Source.Note, Message.Number)
+			: *FString::Printf(TEXT("CC %d"), Message.Number),
+		Message.Channel, *Binding.Tag.ToString(), *Binding.FunctionName.ToString());
 
 	CancelLearn(Map);
 
 	Map->Refresh();
 	Map->MarkPackageDirty();
 
-	// Nudge the details panel so the new note appears without a reselect.
+	// Nudge the details panel so the new input appears without a reselect.
 	Map->PostEditChange();
 
 	return true;
@@ -555,98 +625,149 @@ static TAutoConsoleVariable<int32> CVarOscuMIDIMonitor(
 	TEXT("1 logs every incoming MIDI note with its raw channel, note number and resolved name."),
 	ECVF_Default);
 
-int32 UOscuMIDISubsystem::IngestNote(int32 Channel, int32 Note, int32 Velocity, bool bNoteOn)
+int32 UOscuMIDISubsystem::IngestNote(const int32 Channel, const int32 Note, const int32 Velocity, const bool bNoteOn, const FName Device)
 {
-	++NotesReceived;
+	FOscuMIDIMessage Message;
+	Message.Type = EOscuMIDIInputType::Note;
+	Message.Channel = Channel;
+	Message.Number = Note;
+	Message.Value = Velocity;
+	Message.bNoteOn = bNoteOn;
+	return IngestMessage(Device, Message);
+}
+
+int32 UOscuMIDISubsystem::IngestControlChange(const int32 Channel, const int32 ControlNumber, const int32 Value, const FName Device)
+{
+	FOscuMIDIMessage Message;
+	Message.Type = EOscuMIDIInputType::ControlChange;
+	Message.Channel = Channel;
+	Message.Number = ControlNumber;
+	Message.Value = Value;
+	return IngestMessage(Device, Message);
+}
+
+int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessage& Message)
+{
+	++MessagesReceived;
+
+	const bool bIsNote = Message.Type == EOscuMIDIInputType::Note;
 
 	if (CVarOscuMIDIMonitor.GetValueOnGameThread() != 0)
 	{
-		const FString NoteName = (Note >= 0 && Note <= 127)
-			? OscuMIDINoteName::ToString(static_cast<uint8>(Note), UOscuSettings::Get()->MiddleCOctave)
-			: TEXT("?");
+		if (bIsNote)
+		{
+			const FString NoteName = (Message.Number >= 0 && Message.Number <= 127)
+				? OscuMIDINoteName::ToString(static_cast<uint8>(Message.Number), UOscuSettings::Get()->MiddleCOctave)
+				: TEXT("?");
 
-		UE_LOG(LogOSCulator, Log, TEXT("MIDI in: channel=%d note=%d (%s) velocity=%d %s"),
-			Channel, Note, *NoteName, Velocity, bNoteOn ? TEXT("on") : TEXT("off"));
+			UE_LOG(LogOSCulator, Log, TEXT("MIDI in [%s]: channel=%d note=%d (%s) velocity=%d %s"),
+				*Device.ToString(), Message.Channel, Message.Number, *NoteName, Message.Value,
+				Message.bNoteOn ? TEXT("on") : TEXT("off"));
+		}
+		else
+		{
+			UE_LOG(LogOSCulator, Log, TEXT("MIDI in [%s]: channel=%d CC=%d value=%d"),
+				*Device.ToString(), Message.Channel, Message.Number, Message.Value);
+		}
 	}
 
-	if (!bLoggedFirstNote)
+	if (!bLoggedFirstMessage)
 	{
-		bLoggedFirstNote = true;
+		bLoggedFirstMessage = true;
 		UE_LOG(LogOSCulator, Log,
-			TEXT("First MIDI note: channel=%d note=%d velocity=%d (%s). Channels are numbered 1-16 here, matching the map asset."),
-			Channel, Note, Velocity, bNoteOn ? TEXT("on") : TEXT("off"));
+			TEXT("First MIDI message: device='%s' channel=%d %s=%d value=%d. Channels are numbered 1-16 here, matching the map asset."),
+			*Device.ToString(), Message.Channel, bIsNote ? TEXT("note") : TEXT("CC"), Message.Number, Message.Value);
 	}
 
-	if (Channel < 1 || Channel > 16 || Note < 0 || Note > 127)
+	if (Message.Channel < 1 || Message.Channel > 16 || Message.Number < 0 || Message.Number > 127)
 	{
 		return 0;
 	}
 
 #if WITH_EDITOR
-	// Learn claims the note before anything else looks at it, and only on note on --
-	// releasing a pad should not count as the note you meant.
-	if (bNoteOn && ApplyLearn(Channel, Note))
+	// Learn claims the message before anything else looks at it. A note only counts on
+	// press -- releasing a pad is not the note you meant -- but any controller movement
+	// will do, since a knob has no press.
+	if ((!bIsNote || Message.bNoteOn) && ApplyLearn(Device, Message))
 	{
 		return 0;
 	}
 #endif
 
-	if (ActiveMap == nullptr)
+	if (ActiveMaps.Num() == 0)
 	{
 		return 0;
 	}
 
-	const FOscuMIDIMatch Match = ActiveMap->FindMapping(static_cast<uint8>(Channel), static_cast<uint8>(Note));
-	if (!Match.IsValid())
+	// Gathered across every map. Which asset a binding lives in is an organisational
+	// choice -- per device, per show, or one of each -- and must not change what fires.
+	TArray<FOscuMIDIMatch> Matches;
+	TArray<FOscuMIDIMatch> FromOneMap;
+
+	for (const TObjectPtr<UOscuMIDIMap>& Map : ActiveMaps)
 	{
-		// Not ours. Anything unmapped passes through untouched, for other systems
-		// to interpret however they like.
-		++NotesUnmapped;
-		return 0;
+		if (Map == nullptr)
+		{
+			continue;
+		}
+
+		Map->FindMatches(Device, static_cast<uint8>(Message.Channel), Message.Type, Message.Number, FromOneMap);
+		Matches.Append(FromOneMap);
 	}
 
-	if (!bNoteOn && !Match.Note->bFireOnNoteOff)
+	if (Matches.Num() == 0)
 	{
+		// Not ours. Anything unbound passes through untouched, for other systems to
+		// interpret however they like.
+		++MessagesUnmapped;
 		return 0;
-	}
-
-	// A note off carries no meaningful velocity, so it sends zero.
-	const double Normalised = bNoteOn ? static_cast<double>(Velocity) / 127.0 : 0.0;
-
-	FOscuMessage Message;
-	Message.Address = FString::Printf(TEXT("/%s/%s"), *Match.Tag.ToString(), *Match.Note->FunctionName.ToString());
-
-	switch (Match.Note->Mode)
-	{
-	case EOscuMIDIValueMode::RawVelocity:
-		Message.Args.Add(FOscuValue::MakeFloat(bNoteOn ? static_cast<double>(Velocity) : 0.0));
-		break;
-
-	case EOscuMIDIValueMode::NoteAndVelocity:
-		Message.Args.Add(FOscuValue::MakeFloat(static_cast<double>(Note)));
-		Message.Args.Add(FOscuValue::MakeFloat(Normalised));
-		break;
-
-	case EOscuMIDIValueMode::Normalized01:
-	default:
-		Message.Args.Add(FOscuValue::MakeFloat(Normalised));
-		break;
 	}
 
 	UOscuRouterSubsystem* Router = UOscuRouterSubsystem::Get(FindDispatchWorld());
 	if (Router == nullptr)
 	{
-		// Editor-time notes with nothing playing. Not a fault.
+		// Editor-time messages with nothing playing. Not a fault.
 		return 0;
 	}
 
-	// Lenient always. MIDI supplies one value regardless of what the signature
-	// wants, and that is the entire reason MIDI needs no marshalling of its own:
-	// unfilled parameters keep the zeroes the initialised frame already gave them.
-	const int32 Calls = Router->DispatchMessage(Message, EOscuArgPolicy::Lenient);
+	int32 Calls = 0;
+
+	// Plural on purpose. One input driving two functions on two different actors is a
+	// thing people want; the old channel-first structure could only call it a mistake.
+	for (const FOscuMIDIMatch& Match : Matches)
+	{
+		const FOscuMIDIBinding& Binding = *Match.Binding;
+
+		if (bIsNote && !Message.bNoteOn && !Binding.bFireOnNoteOff)
+		{
+			continue;
+		}
+
+		// A released note carries no meaningful velocity, so it shapes zero -- which is
+		// OutMin, not necessarily 0.0, and that distinction is the point of a remap.
+		const int32 Raw = (bIsNote && !Message.bNoteOn) ? 0 : Message.Value;
+
+		FOscuMessage Outgoing;
+		Outgoing.Address = FString::Printf(TEXT("/%s/%s"), *Binding.Tag.ToString(), *Binding.FunctionName.ToString());
+
+		if (Binding.bSendSourceNumber)
+		{
+			// Raw and never remapped: which control arrived is an identity, not a
+			// measurement.
+			Outgoing.Args.Add(FOscuValue::MakeFloat(static_cast<double>(Message.Number)));
+		}
+		Outgoing.Args.Add(FOscuValue::MakeFloat(Binding.ShapeValue(Raw)));
+
+		// Lenient always. MIDI supplies one value regardless of what the signature
+		// wants: unfilled parameters keep the zeroes the initialised frame gave them,
+		// and a float landing in an int parameter is truncated by the marshal, which is
+		// what makes "remap to 0-10 and call an int function" work without a mode.
+		Calls += Router->DispatchMessage(Outgoing, EOscuArgPolicy::Lenient);
+	}
+
 	if (Calls > 0)
 	{
-		++NotesDispatched;
+		++MessagesDispatched;
 	}
 	return Calls;
 }

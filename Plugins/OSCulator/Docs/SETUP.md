@@ -225,99 +225,177 @@ source port is ephemeral, not the port it listens on, so there is no way to gues
 | Enable MIDI In | Off by default |
 | MIDI Input Device Names | Exact names. Run `OSCulator.MIDIDevices` to list them |
 | Middle C Octave | `3` gives C3 = 60 (Ableton, Logic). `4` gives C4 = 60 (scientific) |
-| MIDI Map | The mapping asset |
+| Listen For | Which message types reach the queue at all. See below |
+| MIDI Input Channels | Listen only on these, 1–16. Empty means all sixteen |
+| MIDI Input Queue Size | Messages buffered between frames. Default 1024 |
+| MIDI Maps | The mapping assets. All of them are live at once |
 
-### One map, every device
+### OSCulator reads MIDI itself
 
-**All listed input devices merge into one stream and share one map.** Two controllers
-both sending channel 1 note 60 will both fire the same mapping. There is no per-device
-map and no per-device routing.
+Input does **not** go through Unreal's MIDIDevice plugin. That plugin has three defects
+that cannot be reached from outside it: it opens every stream with PortMidi's default
+filter (active sensing and nothing else), it passes a zeroed buffer size to
+`Pm_OpenInput` so the queue is never the size anyone asked for, and it exposes neither
+the message filter nor the channel mask. OSCulator runs its own PortMidi instance and
+owns the whole path: open, filter, mask, read, close.
 
-If you need two controllers behaving differently, **put them on different MIDI
-channels** and give each channel its own entry in the map.
+MIDI **output** still uses the engine plugin, which has none of these problems. The two
+PortMidi instances share no state — verified by making the engine terminate and restart
+its copy while an OSCulator stream was open and reading, which it did not notice.
 
-Devices are opened **by name**, never by enumeration order — MIDI exclusivity
-conflicts between applications are real. A device that is missing or already in use is
-skipped with a log line rather than taking the others down with it.
+### Listen For, channels, and the queue
 
-### Creating the map
+These three settings exist because of one fact: **the input queue is drained once per
+game-thread frame**. Any hitch — pressing Play, a shader compile — is a window in which
+nothing drains and the queue fills. When it fills, PortMidi discards everything in it
+and reports an overflow, so a flood of messages nobody wants takes your notes with it.
+
+Measured on a sequencer running at tempo: **MIDI clock was 68% of all traffic** (340 of
+503 messages in six seconds), with control change another ~70/second once modulation was
+running. Clock alone will overflow a small queue within seconds of pressing Play.
+
+So:
+
+- **Listen For** drops whole message types at the port, before they are ever queued.
+  Ticked means *send me this*. Clock, transport and sysex start unticked because nothing
+  in OSCulator can act on them; everything carrying a playable value starts ticked.
+- **MIDI Input Channels** is the sharper tool. A MIDI interface carries a whole rig
+  while a map answers to two or three channels — everything on the others is discarded
+  at the port. Unlike unticking Control Change, this costs you nothing you wanted.
+  Entries outside 1–16 are ignored with a log line, and a list containing nothing valid
+  falls back to every channel rather than silently muting the device.
+- **Queue Size** is the headroom. At ~100 messages/second, 1024 absorbs about ten
+  seconds of stalled game thread.
+
+If an overflow does happen you get a log line naming the device, the queue size, and
+what to change. `OSCulator.MIDI` shows a per-port overflow count.
+
+MIDI Learn temporarily ignores the channel list while a source is armed, so you can
+still learn an input from a channel you normally mute.
+
+### Devices, and sharing them with other applications
+
+Devices are opened **by name**, never by enumeration order — device indices move when
+anything is plugged in. A device that is missing or refused is skipped with a log line
+rather than taking the others down with it.
+
+Whether another application can hold the same port at the same time **depends on the
+driver**. An Elektron TM-1 was verified open in TouchDesigner and Unreal simultaneously,
+both receiving, while plenty of Windows MIDI inputs refuse a second client outright.
+PortMidi's own "in use" flag only ever sees the current process, so a conflict cannot be
+detected before trying — if one occurs you get:
+
+```
+MIDI input device 'X' could not be opened (...). Another application may be holding it.
+```
+
+Each client gets its own queue, so another application's traffic cannot overflow yours.
+
+### The map asset
 
 Content Browser → right-click → **Miscellaneous → Data Asset** → pick
 **OSCulator MIDI Map**.
 
+Maps are written **target-first**: you list what is controllable, then assign inputs to
+it. A function that no longer exists is simply absent from the list rather than lurking
+as a row pointing nowhere.
+
 ```
-Channels[]
-├─ Channel   1-16          the MIDI channel, as every DAW displays it
-├─ Tag       "laser"       prefix already stripped
-└─ Notes[]
-   ├─ Note          "C3"   or "C#2", "Db2", or a bare "61"
-   ├─ Resolved Note 60     read-only, always visible
-   ├─ Function Name "Fire"
-   ├─ Mode          Normalized01
-   ├─ Fire On Note Off     also fire on release, with velocity 0
-   └─ Learn                tick to arm, see below
+Default Device               every source here means this device unless it says otherwise
+
+Auto Map Rules[]             per-tag layout, used by Auto-Map. See below
+├─ Tag / Device / Channel
+└─ First Note / First CC
+
+Bindings[]
+├─ Tag                       "laser", from an actor tagged OSC_laser
+├─ Function Name             called on every actor carrying the tag
+├─ Sources[]                 everything that fires it. None is legal and inert
+│  ├─ Device                 empty inherits Default Device; empty there means any
+│  ├─ Channel                1-16
+│  ├─ Type                   Note or Control Change
+│  ├─ Note / CC Number       "C3", "C#2", a bare "61", or a CC number
+│  └─ Learn                  tick to arm, then play or turn something
+├─ Remap                     on by default: 0-127 becomes Out Min..Out Max
+├─ Out Min / Out Max         default 0..1. Out Min > Out Max inverts
+├─ Send Source Number        prepend the note or CC number, raw, as a first argument
+└─ On Note Off               also fire on release, with a raw value of 0
 ```
 
-A channel carries the tag, so one channel maps to one actor group and its notes map
-to that group's functions. `(channel, note)` becomes `/laser/Fire`.
+**Several maps are live at once**, so how you split them is your choice: one asset per
+device, one per show, or one for everything. A per-device asset sets `Default Device`
+once at the top and leaves every source's Device empty.
 
-Anything not in the map is **ignored entirely** and passes through untouched, for
-other systems to interpret however they like.
+A binding driven from two controllers is better as **one binding with two sources** than
+as two bindings in two assets — the target and its value settings stay in one place
+instead of being kept in sync by hand.
 
-**Resolved Note is always shown** because a name alone is ambiguous — note 60 is C3
-in Ableton and C4 in scientific pitch notation, and the MIDI specification defines no
-octave naming at all. Names are normalised to sharps when edited, so `Db2` becomes
-`C#2`.
-
-### Value modes
-
-| Mode | Sends |
-| --- | --- |
-| Raw Velocity | velocity, 0–127 |
-| **Normalized01** | velocity / 127. The default, since everything else here is 0–1 |
-| Note And Velocity | two arguments: the note number, then normalised velocity |
+**Sharing an input is legal.** Two bindings claiming the same channel and note both
+fire, which is how one pad drives two different actors. `OSCulator.MIDIValidate` lists
+every input that drives more than one binding, across all active maps, so an accidental
+overlap is visible.
 
 ### What the function receives
 
-MIDI dispatch always uses **Lenient** policy: it fills what it has and leaves the rest
-**zero**. MIDI supplies one value regardless of what the signature wants.
+One value, remapped, in the first parameter. Everything after it keeps the zeroes the
+initialised frame gave it — which is why a function you intend to drive from MIDI should
+take its MIDI-relevant parameter first.
 
-So a five-argument `Fire(FVector Dir, FName Mode, float Power)` fired from a pad gets
-velocity in `Dir.X` and zeroes everywhere else.
+A float landing in an `int32` parameter is **truncated toward zero**, so "remap to 0–10
+and call a function taking an int" works with no extra setting. With **Send Source
+Number** on, the note or CC number arrives first, unremapped, and the value second.
 
-**Put the velocity-relevant parameter first**, and read anything else from actor
-variables inside the event. Blueprint parameter defaults are *not* applied — they live
-in editor-only metadata and are baked into the call node, so `ProcessEvent` never sees
-them. Unfilled means zero, full stop.
+Arguments are always accepted leniently: a zero-argument trigger simply ignores the
+value it is handed.
 
-### Auto-populate
+### Auto-Map
 
-Open the map asset and click **Auto-Populate From Level**. It walks every tagged actor
-in the open level and maps each Blueprint-authored function to the next free note from
-36 upwards, assigning channels in order from 1.
+**Auto-Map From Level** runs in two phases:
 
-Two rules make this safe:
+1. **Lists** every Blueprint-authored function of every tagged actor in the open level
+   as a binding, unassigned. This is what makes the asset a complete inventory of what
+   could be controlled. Blueprint-authored only — a fully exposed actor drags in a
+   couple of hundred inherited engine functions.
+2. **Assigns** an input to any unassigned binding whose tag has an **Auto Map Rule**,
+   handing out numbers upward from the rule's First Note / First CC and stepping over
+   anything already claimed.
 
-- Functions are merged **alphabetically**, not in reflection order. A class's function
-  map does not iterate stably across Blueprint recompiles.
-- It is **additive only**. An existing row is never moved, renumbered or rewritten.
+Note or CC is chosen from the signature: a function taking nothing is a trigger and gets
+a note; one whose first parameter is a `float` or `int` is continuous and gets a
+controller; anything else gets a note.
 
-So running it twice changes nothing, and hand-edited rows survive. It runs only when
-clicked; your own mapping decisions always win.
+**It is additive only.** An existing binding or source is never moved, renumbered or
+rewritten. This matters more than it sounds: a Blueprint class's function map does not
+iterate in a stable order across recompiles, so anything that rewrote rows would
+reshuffle which pad triggers what every time you compiled — and you would find out
+mid-show. Functions are merged alphabetically for the same reason.
+
+### Validate and Prune
+
+**Validate Against Level** marks every binding and logs two lists: bindings whose
+function no longer exists, and functions the level exposes that nothing claims. A
+renamed function appears in **both**, so fixing it means retyping one name — and the
+binding keeps its sources, remap range and note-off setting. It also runs automatically
+at the end of Auto-Map.
+
+**Prune Missing Functions** deletes bindings whose tag is present in the level but whose
+function is not. It re-validates first, so it can never act on a stale judgement.
+Bindings whose *tag* is missing are never touched — a tag absent from this level is
+probably present in another one.
+
+A binding mapped by hand to a **native C++** function is judged correctly: validation
+checks against everything exposed, not just the Blueprint-authored subset that Auto-Map
+offers. Otherwise Prune would delete working mappings.
 
 ### Learn
 
-Expand **Channels → [n] → Notes → [n]** and tick **Learn** on the row. Play a note and
-the row rewrites itself, then disarms. Only one row can be armed at a time.
+Tick **Learn** on a source, then play a note or turn a knob. It captures the device, the
+channel, whether it was a note or a CC, and the number — one gesture fills the whole
+row. Only one source across the asset can be armed at a time; ticking a second moves the
+arming. The flag is transient, so an armed source is never saved in that state.
 
-Learn writes the **note only**. The row's channel must already be correct — moving the
-row would drag its siblings to a different channel too. If the learned note arrives on
-a different channel you get a warning saying so.
-
-Learn works at edit time, which is the one thing OSCulator does outside play. It needs
-the input device already open.
-
----
+Learn is the one thing OSCulator does at edit time, and it works because the devices are
+already open — it redirects the next message rather than opening a second listener.
 
 ## 6. MIDI output
 
@@ -360,10 +438,11 @@ real hardware, and nothing inside Unreal can silence it afterwards.
 nodes, and in the monitor output. Matching every DAW. The wire protocol's 0–15 is
 converted internally, in exactly one place.
 
-**Windows MIDI input ports are single-owner.** Unreal and TouchDesigner cannot both
-hold the same physical port. Use a virtual port pair such as loopMIDI if you need
-both. OSCulator releases its ports immediately when you disable MIDI input or remove a
-device, so you can hand one back without restarting.
+**Whether a MIDI input port can be shared depends on the driver.** Plenty of Windows
+inputs refuse a second client, but not all: an Elektron TM-1 was verified open in
+TouchDesigner and Unreal at once, both receiving. If yours does refuse, use a virtual
+port pair such as loopMIDI. OSCulator releases its ports immediately when you disable
+MIDI input or remove a device, so you can hand one back without restarting.
 
 **TouchDesigner's `n` labels are 1-based.** TD sends `label - 1` on the wire, so
 `n38` is MIDI note 37. To hit a map row showing `(37)`, send `n38`. Confirm with
@@ -372,9 +451,9 @@ device, so you can hand one back without restarting.
 **Settings take effect immediately.** Editing a device name, a port or a target
 reopens the affected transport — no editor restart.
 
-**Everything runs in PIE and packaged builds.** The editor gets a registry only so
-that MIDI auto-populate can ask what a level exposes; nothing dispatches there.
-MIDI Learn is the single edit-time exception.
+**Everything runs in PIE and packaged builds.** The editor gets a registry only so that
+MIDI Auto-Map and Validate can ask what a level exposes; nothing dispatches there. MIDI
+Learn is the single edit-time exception.
 
 **Dispatch is game-thread only**, drained before actor ticks, so a message received
 this frame affects this frame rather than the next.
