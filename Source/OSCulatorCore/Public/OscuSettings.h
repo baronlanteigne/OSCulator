@@ -46,6 +46,77 @@ struct OSCULATORCORE_API FOscuOSCTarget
  * The same booleans gate whether anything is opened at runtime, so a disabled
  * branch costs nothing at all: no socket, no thread, no tick hook.
  */
+/**
+ * Which kinds of MIDI message an input device listens for.
+ *
+ * Ticked means "I want this". Anything left unticked is discarded at the port, before
+ * it is ever queued, and that is the point: UE's MIDI input queue is drained once per
+ * game thread frame, so any hitch -- hitting Play, a shader compile -- is a window in
+ * which nothing drains and the queue fills. When it fills, PortMidi throws away
+ * everything in it, so a stream of messages nobody asked for takes the notes down
+ * with it. Measured on a sequencer running at tempo, clock alone was 68% of the
+ * traffic on the wire.
+ *
+ * Clock, transport and sysex start unticked because nothing in OSCulator can act on
+ * them today. Everything that carries a playable value starts ticked, so a device
+ * works as expected out of the box and narrowing it is a deliberate act.
+ *
+ * To cut continuous controller traffic specifically, reach for MIDIInputChannels
+ * first: dropping a channel you do not map costs you nothing, while unticking Control
+ * Change costs you every controller on every channel.
+ */
+USTRUCT()
+struct FOscuMIDIInputMessages
+{
+	GENERATED_BODY()
+
+	/**
+	 * Note on and note off: everything a map asset can currently address.
+	 *
+	 * Untick it and OSCulator receives nothing it knows what to do with, and Learn
+	 * stops working. It is offered anyway, because a list of "what I need" that leaves
+	 * out the main thing is its own kind of confusing -- and because a project driving
+	 * only continuous controllers is a reasonable thing to want later. Unticking it is
+	 * called out in the log at startup rather than left to be discovered.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bNotes = true;
+
+	/** Control change. Continuous while anything is modulating -- often the largest share of the traffic after clock. */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bControlChange = true;
+
+	/** Program change. Rare on the wire, and cheap to keep. */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bProgramChange = true;
+
+	/** Pitch bend. Continuous while a wheel moves. */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bPitchBend = true;
+
+	/** Channel and polyphonic aftertouch. Continuous while keys are held. */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bAftertouch = true;
+
+	/**
+	 * Clock, tick and MTC quarter frame: the continuous timing streams.
+	 *
+	 * Around fifty messages a second at any ordinary tempo, and a hundred for
+	 * timecode, arriving whether or not anyone is playing. This is the one that
+	 * overflows queues. Tick it only to count clock yourself.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bClock = false;
+
+	/** Start, stop, continue, song position, song select. A handful per button press, so cheap to keep. */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bTransport = false;
+
+	/** System exclusive. Bursty -- a patch dump is thousands of bytes and can fill the queue by itself. */
+	UPROPERTY(EditAnywhere, Category = "Listen For")
+	bool bSysEx = false;
+};
+
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "OSCulator"))
 class OSCULATORCORE_API UOscuSettings : public UDeveloperSettings
 {
@@ -210,18 +281,24 @@ public:
 	TArray<FString> MIDIInputDeviceNames;
 
 	/**
-	 * Which mapping asset is active. What it CONTAINS lives in the asset, so a
-	 * different show is a different asset rather than a different build.
+	 * Which mapping assets are active. All of them, at once.
 	 *
-	 * A soft path with an AllowedClasses filter rather than a typed pointer,
-	 * because UOscuMIDIMap lives in OSCulatorMIDI and this settings object lives in
-	 * OSCulatorCore -- a typed reference would make the dependency circular. The
-	 * filter still gives a properly restricted asset picker in the details panel.
+	 * A list rather than one, so the split is yours to choose: one asset per device,
+	 * one per show, or one for everything. Per-device is the reason this is a list --
+	 * an asset with its Default Device set names its hardware once at the top and every
+	 * source below inherits it -- but nothing forces that, because a function driven
+	 * from two controllers is better as one binding with two sources than as two
+	 * bindings in two assets with their value settings kept in sync by hand.
+	 *
+	 * Soft paths with an AllowedClasses filter rather than typed pointers, because
+	 * UOscuMIDIMap lives in OSCulatorMIDI and this settings object lives in
+	 * OSCulatorCore -- a typed reference would make the dependency circular. The filter
+	 * still gives a properly restricted asset picker in the details panel.
 	 */
 	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
 		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides,
 				AllowedClasses = "/Script/OSCulatorMIDI.OscuMIDIMap"))
-	FSoftObjectPath MIDIMap;
+	TArray<FSoftObjectPath> MIDIMaps;
 
 	/**
 	 * Which octave number note 60 is called. 3 gives C3 = 60, matching Ableton and
@@ -233,6 +310,47 @@ public:
 	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
 		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides, ClampMin = "0", ClampMax = "5"))
 	int32 MiddleCOctave = 3;
+
+	/**
+	 * Which kinds of message to listen for. Anything unticked is discarded at the
+	 * port. See FOscuMIDIInputMessages.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
+		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides, DisplayName = "Listen For"))
+	FOscuMIDIInputMessages MIDIInputMessages;
+
+	/**
+	 * Which MIDI channels to listen on, 1-16. Empty means all of them.
+	 *
+	 * The sharpest tool here, and the one to reach for first. A MIDI interface carries
+	 * a whole rig, while a map usually answers to two or three channels; everything on
+	 * the others is discarded at the port instead of taking a queue slot. Unlike the
+	 * type filter it costs nothing you might want -- a channel you do not map is a
+	 * channel you do not use.
+	 *
+	 * Learn ignores this while a row is armed, so a note can still be learned from a
+	 * channel that is normally muted. It would be a long afternoon otherwise.
+	 *
+	 * Entries outside 1-16 are ignored with a log line, and a list containing nothing
+	 * valid falls back to every channel: a new row starts at 0, and silently muting the
+	 * device the moment one is added would look exactly like broken hardware.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
+		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides))
+	TArray<int32> MIDIInputChannels;
+
+	/**
+	 * How many messages each input device can queue between frames.
+	 *
+	 * Sized in messages, not bytes. The default is what the engine's own MIDI plugin
+	 * intends and then fails to pass on -- it hands PortMidi a zero and gets a much
+	 * smaller fallback queue, which is why a busy device overflows within seconds of
+	 * pressing Play. At a hundred messages a second, 1024 absorbs about ten seconds of
+	 * stalled game thread; the fallback managed under three.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
+		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides, ClampMin = "64", ClampMax = "16384"))
+	int32 MIDIInputQueueSize = 1024;
 
 	// ---- MIDI Output ----
 

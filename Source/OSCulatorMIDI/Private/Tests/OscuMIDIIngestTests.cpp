@@ -18,41 +18,71 @@ namespace OscuMIDITest
 	 * specifically about naming, so that a project's MiddleCOctave setting cannot
 	 * change what these tests mean.
 	 */
-	FOscuMIDINoteMap MakeNote(const TCHAR* NoteText, const TCHAR* FunctionName, EOscuMIDIValueMode Mode = EOscuMIDIValueMode::Normalized01)
+	FOscuMIDISource NoteOn(uint8 Channel, const TCHAR* NoteText, FName Device = NAME_None)
 	{
-		FOscuMIDINoteMap Note;
-		Note.Note = NoteText;
-		Note.FunctionName = FName(FunctionName);
-		Note.Mode = Mode;
-		return Note;
+		FOscuMIDISource Source;
+		Source.Type = EOscuMIDIInputType::Note;
+		Source.Channel = Channel;
+		Source.Note = NoteText;
+		Source.Device = Device;
+		return Source;
 	}
 
-	UOscuMIDIMap* MakeMap(uint8 Channel, const TCHAR* Tag, std::initializer_list<FOscuMIDINoteMap> Notes)
+	FOscuMIDISource ControlChange(uint8 Channel, uint8 Number, FName Device = NAME_None)
+	{
+		FOscuMIDISource Source;
+		Source.Type = EOscuMIDIInputType::ControlChange;
+		Source.Channel = Channel;
+		Source.ControlNumber = Number;
+		Source.Device = Device;
+		return Source;
+	}
+
+	FOscuMIDIBinding Bind(const TCHAR* Tag, const TCHAR* FunctionName, std::initializer_list<FOscuMIDISource> Sources)
+	{
+		FOscuMIDIBinding Binding;
+		Binding.Tag = FName(Tag);
+		Binding.FunctionName = FName(FunctionName);
+		Binding.Sources.Append(Sources);
+		return Binding;
+	}
+
+	UOscuMIDIMap* MakeMap(std::initializer_list<FOscuMIDIBinding> Bindings)
 	{
 		UOscuMIDIMap* Map = NewObject<UOscuMIDIMap>(GetTransientPackage());
-
-		FOscuMIDIChannelMap ChannelMap;
-		ChannelMap.Channel = Channel;
-		ChannelMap.Tag = FName(Tag);
-		ChannelMap.Notes.Append(Notes);
-
-		Map->Channels.Add(MoveTemp(ChannelMap));
+		Map->Bindings.Append(Bindings);
 		Map->Refresh();
 		return Map;
 	}
 
-	/** Puts the subsystem's map back however the test leaves. */
+	/** Puts the subsystem's maps back however the test leaves. Saves the whole set,
+	 *  not just the first, now that several can be live at once. */
 	struct FScopedActiveMap
 	{
 		UOscuMIDISubsystem* MIDI = UOscuMIDISubsystem::Get();
-		UOscuMIDIMap* Saved = nullptr;
+		TArray<TObjectPtr<UOscuMIDIMap>> Saved;
 
 		explicit FScopedActiveMap(UOscuMIDIMap* Map)
 		{
 			if (MIDI != nullptr)
 			{
-				Saved = MIDI->GetActiveMap();
+				Saved = MIDI->GetActiveMaps();
 				MIDI->SetActiveMap(Map);
+			}
+		}
+
+		explicit FScopedActiveMap(std::initializer_list<UOscuMIDIMap*> Maps)
+		{
+			if (MIDI != nullptr)
+			{
+				Saved = MIDI->GetActiveMaps();
+
+				TArray<TObjectPtr<UOscuMIDIMap>> Live;
+				for (UOscuMIDIMap* Map : Maps)
+				{
+					Live.Add(Map);
+				}
+				MIDI->SetActiveMaps(MoveTemp(Live));
 			}
 		}
 
@@ -60,7 +90,7 @@ namespace OscuMIDITest
 		{
 			if (MIDI != nullptr)
 			{
-				MIDI->SetActiveMap(Saved);
+				MIDI->SetActiveMaps(Saved);
 			}
 		}
 	};
@@ -89,24 +119,24 @@ bool FOscuMIDIIngestTest::RunTest(const FString& Parameters)
 	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
 	Scope.BeginPlay();
 
-	UOscuMIDIMap* Map = MakeMap(1, TEXT("laser"), {
-		MakeNote(TEXT("60"), TEXT("SetIntensity")),
-		MakeNote(TEXT("62"), TEXT("Fire")),
-		MakeNote(TEXT("64"), TEXT("Stop")),
+	UOscuMIDIMap* Map = MakeMap({
+		Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("60")) }),
+		Bind(TEXT("laser"), TEXT("Fire"), { NoteOn(1, TEXT("62")) }),
+		Bind(TEXT("laser"), TEXT("Stop"), { NoteOn(1, TEXT("64")) }),
 	});
 	FScopedActiveMap ActiveMap(Map);
 
-	// A clean single-parameter mapping: full velocity normalises to 1.0.
+	// A clean single-parameter mapping: full velocity remaps to 1.0.
 	{
 		const int32 Calls = MIDI->IngestNote(1, 60, 127, /*bNoteOn*/ true);
 		TestEqual(TEXT("The note fired one actor"), Calls, 1);
 		TestEqual(TEXT("It called the mapped function"), Laser->LastCalled, FName("SetIntensity"));
-		TestEqual(TEXT("Velocity 127 normalises to 1.0"), Laser->LastIntensity, 1.0);
+		TestEqual(TEXT("Velocity 127 remaps to 1.0"), Laser->LastIntensity, 1.0);
 	}
 
 	{
 		MIDI->IngestNote(1, 60, 64, true);
-		TestEqual(TEXT("Velocity 64 normalises to 64/127"), Laser->LastIntensity, 64.0 / 127.0, 0.0001);
+		TestEqual(TEXT("Velocity 64 remaps to 64/127"), Laser->LastIntensity, 64.0 / 127.0, 0.0001);
 	}
 
 	// The acceptance criterion proper: velocity in parameter 0, zeroes elsewhere.
@@ -128,7 +158,7 @@ bool FOscuMIDIIngestTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("...and zeroed"), Laser->LastPower, 0.0f);
 	}
 
-	// A zero-argument trigger takes the velocity and discards it, because surplus
+	// A zero-argument trigger takes the value and discards it, because surplus
 	// arguments are tolerated.
 	{
 		const int32 Calls = MIDI->IngestNote(1, 64, 100, true);
@@ -136,26 +166,106 @@ bool FOscuMIDIIngestTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Called Stop"), Laser->LastCalled, FName("Stop"));
 	}
 
-	// Note off is ignored unless the row asks for it.
+	// Note off is ignored unless the binding asks for it.
 	{
 		const int32 CallsBefore = Laser->CallCount;
 		MIDI->IngestNote(1, 60, 0, /*bNoteOn*/ false);
 		TestEqual(TEXT("Note off does nothing by default"), Laser->CallCount, CallsBefore);
 	}
 
-	// Unmapped notes and channels pass through untouched.
+	// Unbound notes and channels pass through untouched.
 	{
-		const uint64 UnmappedBefore = MIDI->GetNotesUnmapped();
-		TestEqual(TEXT("An unmapped note calls nothing"), MIDI->IngestNote(1, 99, 127, true), 0);
-		TestEqual(TEXT("A mapped note on the wrong channel calls nothing"), MIDI->IngestNote(2, 60, 127, true), 0);
-		TestEqual(TEXT("Both were counted as unmapped"), MIDI->GetNotesUnmapped(), UnmappedBefore + 2);
+		const uint64 UnmappedBefore = MIDI->GetMessagesUnmapped();
+		TestEqual(TEXT("An unbound note calls nothing"), MIDI->IngestNote(1, 99, 127, true), 0);
+		TestEqual(TEXT("A bound note on the wrong channel calls nothing"), MIDI->IngestNote(2, 60, 127, true), 0);
+		TestEqual(TEXT("Both were counted as unmapped"), MIDI->GetMessagesUnmapped(), UnmappedBefore + 2);
+
+		// And a CC on a note's number is a different input entirely, not a near miss.
+		TestEqual(TEXT("A CC numbered like a bound note calls nothing"), MIDI->IngestControlChange(1, 60, 127), 0);
 	}
 
 	return true;
 }
 
 //////////////////////////////////////////////////////////////////////////
-// Value modes and note off
+// Control change, and the value shaping that goes with it
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuMIDIControlChangeTest,
+	"OSCulator.MIDI.ControlChange",
+	OscuTest::Flags)
+
+bool FOscuMIDIControlChangeTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuMIDITest;
+
+	UOscuMIDISubsystem* MIDI = UOscuMIDISubsystem::Get();
+	if (!TestNotNull(TEXT("The MIDI engine subsystem exists"), MIDI))
+	{
+		return false;
+	}
+
+	FScopedTestWorld Scope;
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	Scope.BeginPlay();
+
+	// Same function, four different shaping settings, so the differences are the only
+	// thing the test is looking at.
+	FOscuMIDIBinding Normalised = Bind(TEXT("laser"), TEXT("SetIntensity"), { ControlChange(1, 74) });
+
+	FOscuMIDIBinding Raw = Bind(TEXT("laser"), TEXT("SetIntensity"), { ControlChange(1, 75) });
+	Raw.bRemap = false;
+
+	FOscuMIDIBinding Scaled = Bind(TEXT("laser"), TEXT("SetIntensity"), { ControlChange(1, 76) });
+	Scaled.OutMin = 0.0f;
+	Scaled.OutMax = 10.0f;
+
+	FOscuMIDIBinding Inverted = Bind(TEXT("laser"), TEXT("SetIntensity"), { ControlChange(1, 77) });
+	Inverted.OutMin = 1.0f;
+	Inverted.OutMax = 0.0f;
+
+	UOscuMIDIMap* Map = MakeMap({ Normalised, Raw, Scaled, Inverted });
+	FScopedActiveMap ActiveMap(Map);
+
+	{
+		const int32 Calls = MIDI->IngestControlChange(1, 74, 127);
+		TestEqual(TEXT("A control change fires its binding"), Calls, 1);
+		TestEqual(TEXT("Called the bound function"), Laser->LastCalled, FName("SetIntensity"));
+		TestEqual(TEXT("127 remaps to 1.0 by default"), Laser->LastIntensity, 1.0);
+	}
+
+	MIDI->IngestControlChange(1, 74, 0);
+	TestEqual(TEXT("0 remaps to 0.0"), Laser->LastIntensity, 0.0);
+
+	MIDI->IngestControlChange(1, 74, 64);
+	TestEqual(TEXT("64 remaps to 64/127"), Laser->LastIntensity, 64.0 / 127.0, 0.0001);
+
+	// Remapping off is the escape hatch for a function that wants the wire value.
+	MIDI->IngestControlChange(1, 75, 100);
+	TestEqual(TEXT("With remapping off the raw 0-127 arrives"), Laser->LastIntensity, 100.0);
+
+	MIDI->IngestControlChange(1, 76, 127);
+	TestEqual(TEXT("A 0-10 range scales to its top"), Laser->LastIntensity, 10.0);
+
+	// OutMin above OutMax is how a fader is inverted, and it must not clamp to zero --
+	// which is what a range-clamping helper would have done.
+	MIDI->IngestControlChange(1, 77, 0);
+	TestEqual(TEXT("An inverted range sends its maximum for 0"), Laser->LastIntensity, 1.0);
+	MIDI->IngestControlChange(1, 77, 127);
+	TestEqual(TEXT("...and its minimum for 127"), Laser->LastIntensity, 0.0);
+
+	// The maths on its own, including the values no controller will send but a badly
+	// behaved sender might.
+	FOscuMIDIBinding Shape;
+	TestEqual(TEXT("ShapeValue clamps below zero"), Shape.ShapeValue(-5), 0.0);
+	TestEqual(TEXT("ShapeValue clamps above 127"), Shape.ShapeValue(200), 1.0);
+
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Value shaping on notes, and the settings that used to be value modes
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FOscuMIDIValueModeTest,
@@ -177,31 +287,34 @@ bool FOscuMIDIValueModeTest::RunTest(const FString& Parameters)
 	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
 	Scope.BeginPlay();
 
-	FOscuMIDINoteMap OffCapable = MakeNote(TEXT("67"), TEXT("SetIntensity"));
+	// What used to be RawVelocity.
+	FOscuMIDIBinding RawVelocity = Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("60")) });
+	RawVelocity.bRemap = false;
+
+	// What used to be NoteAndVelocity.
+	FOscuMIDIBinding WithNumber = Bind(TEXT("laser"), TEXT("Chase"), { NoteOn(1, TEXT("62")) });
+	WithNumber.bSendSourceNumber = true;
+
+	FOscuMIDIBinding OffCapable = Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("67")) });
 	OffCapable.bFireOnNoteOff = true;
 
-	UOscuMIDIMap* Map = MakeMap(1, TEXT("laser"), {
-		MakeNote(TEXT("60"), TEXT("SetIntensity"), EOscuMIDIValueMode::RawVelocity),
-		MakeNote(TEXT("62"), TEXT("Chase"), EOscuMIDIValueMode::NoteAndVelocity),
-		OffCapable,
-	});
+	UOscuMIDIMap* Map = MakeMap({ RawVelocity, WithNumber, OffCapable });
 	FScopedActiveMap ActiveMap(Map);
 
-	// Raw velocity is passed through unscaled.
 	MIDI->IngestNote(1, 60, 100, true);
-	TestEqual(TEXT("RawVelocity passes 0-127 through"), Laser->LastIntensity, 100.0);
+	TestEqual(TEXT("Remapping off passes 0-127 through"), Laser->LastIntensity, 100.0);
 
-	// NoteAndVelocity sends two arguments: the note number, then the normalised
-	// velocity. Chase is (float Speed, TArray<float> Points), so the note lands in
-	// Speed and the velocity is swallowed by the trailing array.
+	// Sending the source number puts it first, unremapped. Chase is
+	// (float Speed, TArray<float> Points), so the note lands in Speed and the value is
+	// swallowed by the trailing array.
 	MIDI->IngestNote(1, 62, 127, true);
-	TestEqual(TEXT("NoteAndVelocity puts the note number first"), Laser->LastSpeed, 62.0f);
-	if (TestEqual(TEXT("...and the velocity follows it"), Laser->LastPoints.Num(), 1))
+	TestEqual(TEXT("The source number goes first, raw"), Laser->LastSpeed, 62.0f);
+	if (TestEqual(TEXT("...and the value follows it"), Laser->LastPoints.Num(), 1))
 	{
-		TestEqual(TEXT("...normalised"), Laser->LastPoints[0], 1.0f);
+		TestEqual(TEXT("...remapped"), Laser->LastPoints[0], 1.0f);
 	}
 
-	// With bFireOnNoteOff, the note off fires with a velocity of zero.
+	// With bFireOnNoteOff, the release fires with a raw value of zero.
 	MIDI->IngestNote(1, 67, 127, true);
 	TestEqual(TEXT("Note on carries its velocity"), Laser->LastIntensity, 1.0);
 
@@ -214,65 +327,173 @@ bool FOscuMIDIValueModeTest::RunTest(const FString& Parameters)
 }
 
 //////////////////////////////////////////////////////////////////////////
-// The map asset itself
+// One input, several targets -- and the device filter
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FOscuMIDIMapTest,
-	"OSCulator.MIDI.Map",
+	FOscuMIDISharedInputTest,
+	"OSCulator.MIDI.SharedInput",
 	OscuTest::Flags)
 
-bool FOscuMIDIMapTest::RunTest(const FString& Parameters)
+bool FOscuMIDISharedInputTest::RunTest(const FString& Parameters)
 {
+	using namespace OscuTest;
 	using namespace OscuMIDITest;
 
-	// Pin the octave convention for the duration, so name resolution is being
-	// tested rather than the project's setting.
-	UOscuSettings* Settings = GetMutableDefault<UOscuSettings>();
-	const int32 SavedMiddleC = Settings->MiddleCOctave;
-	Settings->MiddleCOctave = 3;
+	UOscuMIDISubsystem* MIDI = UOscuMIDISubsystem::Get();
+	if (!TestNotNull(TEXT("The MIDI engine subsystem exists"), MIDI))
+	{
+		return false;
+	}
+
+	FScopedTestWorld Scope;
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	AOscuTestActor* Cube = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_cube") });
+	Scope.BeginPlay();
+
+	// The thing the old channel-first structure could not express: one note, on one
+	// channel, driving different functions on two different actors.
+	UOscuMIDIMap* Map = MakeMap({
+		Bind(TEXT("laser"), TEXT("Stop"), { NoteOn(1, TEXT("36")) }),
+		Bind(TEXT("cube"), TEXT("SetIntensity"), { NoteOn(1, TEXT("36")) }),
+	});
+	FScopedActiveMap ActiveMap(Map);
 
 	{
-		UOscuMIDIMap* Map = MakeMap(1, TEXT("laser"), {
-			MakeNote(TEXT("C3"), TEXT("Fire")),
-			MakeNote(TEXT("Db3"), TEXT("Stop")),
+		const int32 Calls = MIDI->IngestNote(1, 36, 127, true);
+		TestEqual(TEXT("One note called two actors"), Calls, 2);
+		TestEqual(TEXT("The first binding fired"), Laser->LastCalled, FName("Stop"));
+		TestEqual(TEXT("The second binding fired too"), Cube->LastCalled, FName("SetIntensity"));
+		TestEqual(TEXT("...with its own shaping"), Cube->LastIntensity, 1.0);
+	}
+
+	// Several sources on one binding: a pad and a knob reaching the same function.
+	{
+		UOscuMIDIMap* Multi = MakeMap({
+			Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("40")), ControlChange(2, 7) }),
 		});
+		FScopedActiveMap Active(Multi);
 
-		// Names resolve to numbers, and the display string is normalised to sharps
-		// so a row reads the same as everything else will show it.
-		if (TestEqual(TEXT("Both rows survived"), Map->Channels[0].Notes.Num(), 2))
-		{
-			TestEqual(TEXT("C3 resolves to 60"), static_cast<int32>(Map->Channels[0].Notes[0].ResolvedNote), 60);
-			TestEqual(TEXT("Db3 resolves to 61"), static_cast<int32>(Map->Channels[0].Notes[1].ResolvedNote), 61);
-			TestEqual(TEXT("Db3 is rewritten as C#3"), Map->Channels[0].Notes[1].Note, FString(TEXT("C#3")));
-		}
+		TestEqual(TEXT("The note source fires it"), MIDI->IngestNote(1, 40, 127, true), 1);
+		TestEqual(TEXT("...remapped"), Laser->LastIntensity, 1.0);
 
-		// The flat lookup finds by channel and note, and carries the channel's tag.
-		const FOscuMIDIMatch Match = Map->FindMapping(1, 60);
-		if (TestTrue(TEXT("Channel 1 note 60 is mapped"), Match.IsValid()))
-		{
-			TestEqual(TEXT("It carries the channel's tag"), Match.Tag, FName("laser"));
-			TestEqual(TEXT("...and the right function"), Match.Note->FunctionName, FName("Fire"));
-		}
-
-		TestFalse(TEXT("An unmapped note is not found"), Map->FindMapping(1, 99).IsValid());
-		TestFalse(TEXT("The right note on the wrong channel is not found"), Map->FindMapping(2, 60).IsValid());
-
-		TestTrue(TEXT("IsNoteTaken sees a mapped note"), Map->IsNoteTaken(1, 60));
-		TestFalse(TEXT("IsNoteTaken rejects a free one"), Map->IsNoteTaken(1, 99));
+		TestEqual(TEXT("The CC source fires the same function"), MIDI->IngestControlChange(2, 7, 0), 1);
+		TestEqual(TEXT("...through the same shaping"), Laser->LastIntensity, 0.0);
 	}
 
+	// A source naming a device accepts only that device; one naming none accepts all.
 	{
-		// Channel numbering is 1-16 in the asset AND in what MIDIDevice delivers --
-		// its input controller computes (Status % 16) + 1 before broadcasting -- so
-		// there is no conversion at ingest. If someone ever adds one, this fails.
-		UOscuMIDIMap* Map = MakeMap(10, TEXT("drums"), { MakeNote(TEXT("36"), TEXT("Hit")) });
+		UOscuMIDIMap* Fussy = MakeMap({
+			Bind(TEXT("laser"), TEXT("Stop"), { NoteOn(1, TEXT("41"), FName("Elektron TM-1")) }),
+			Bind(TEXT("cube"), TEXT("Stop"), { NoteOn(1, TEXT("41")) }),
+		});
+		FScopedActiveMap Active(Fussy);
 
-		TestTrue(TEXT("Channel 10 is found as channel 10"), Map->FindMapping(10, 36).IsValid());
-		TestFalse(TEXT("...not as channel 9"), Map->FindMapping(9, 36).IsValid());
-		TestFalse(TEXT("...and not as channel 11"), Map->FindMapping(11, 36).IsValid());
+		TestEqual(TEXT("A message from the named device reaches both"),
+			MIDI->IngestNote(1, 41, 127, true, FName("Elektron TM-1")), 2);
+
+		TestEqual(TEXT("A message from another device reaches only the unfussy one"),
+			MIDI->IngestNote(1, 41, 127, true, FName("Some Other Box")), 1);
+
+		// The common case: nothing names a device, so nothing has to be typed in.
+		TestEqual(TEXT("A message from nowhere in particular still reaches the unfussy one"),
+			MIDI->IngestNote(1, 41, 127, true), 1);
 	}
 
-	Settings->MiddleCOctave = SavedMiddleC;
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Several maps at once, and the per-asset default device
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuMIDIMultipleMapsTest,
+	"OSCulator.MIDI.MultipleMaps",
+	OscuTest::Flags)
+
+bool FOscuMIDIMultipleMapsTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuMIDITest;
+
+	UOscuMIDISubsystem* MIDI = UOscuMIDISubsystem::Get();
+	if (!TestNotNull(TEXT("The MIDI engine subsystem exists"), MIDI))
+	{
+		return false;
+	}
+
+	FScopedTestWorld Scope;
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	AOscuTestActor* Cube = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_cube") });
+	Scope.BeginPlay();
+
+	// One asset per device, each naming its hardware once at the top instead of on
+	// every row. The sources themselves leave Device empty.
+	UOscuMIDIMap* Pads = MakeMap({ Bind(TEXT("laser"), TEXT("Stop"), { NoteOn(1, TEXT("36")) }) });
+	Pads->DefaultDevice = FName("Elektron TM-1");
+	Pads->Refresh();
+
+	UOscuMIDIMap* Knobs = MakeMap({ Bind(TEXT("cube"), TEXT("SetIntensity"), { ControlChange(1, 7) }) });
+	Knobs->DefaultDevice = FName("Midi Fighter Twister");
+	Knobs->Refresh();
+
+	FScopedActiveMap Active({ Pads, Knobs });
+
+	// Both maps are consulted, so which asset a binding lives in is organisation and
+	// nothing more.
+	{
+		TestEqual(TEXT("A binding in the first map fires"),
+			MIDI->IngestNote(1, 36, 127, true, FName("Elektron TM-1")), 1);
+		TestEqual(TEXT("...calling its function"), Laser->LastCalled, FName("Stop"));
+
+		TestEqual(TEXT("A binding in the second map fires too"),
+			MIDI->IngestControlChange(1, 7, 127, FName("Midi Fighter Twister")), 1);
+		TestEqual(TEXT("...calling its function"), Cube->LastCalled, FName("SetIntensity"));
+	}
+
+	// The asset's default is a real requirement, not decoration: the same note from the
+	// wrong controller must not fire a per-device map.
+	{
+		const int32 CallsBefore = Laser->CallCount;
+		TestEqual(TEXT("The same note from another device does not fire"),
+			MIDI->IngestNote(1, 36, 127, true, FName("Midi Fighter Twister")), 0);
+		TestEqual(TEXT("...and called nothing"), Laser->CallCount, CallsBefore);
+	}
+
+	// A source naming its own device overrides the asset default, so one row can come
+	// from a different box without splitting the asset.
+	{
+		UOscuMIDIMap* Mixed = MakeMap({
+			Bind(TEXT("laser"), TEXT("Stop"), { NoteOn(1, TEXT("40")) }),
+			Bind(TEXT("cube"), TEXT("Stop"), { NoteOn(1, TEXT("41"), FName("Some Other Box")) }),
+		});
+		Mixed->DefaultDevice = FName("Elektron TM-1");
+		Mixed->Refresh();
+
+		FScopedActiveMap Only(Mixed);
+
+		TestEqual(TEXT("The inheriting row wants the asset's device"),
+			MIDI->IngestNote(1, 40, 127, true, FName("Elektron TM-1")), 1);
+		TestEqual(TEXT("...and refuses another"),
+			MIDI->IngestNote(1, 40, 127, true, FName("Some Other Box")), 0);
+
+		TestEqual(TEXT("The overriding row wants its own device"),
+			MIDI->IngestNote(1, 41, 127, true, FName("Some Other Box")), 1);
+		TestEqual(TEXT("...and refuses the asset's"),
+			MIDI->IngestNote(1, 41, 127, true, FName("Elektron TM-1")), 0);
+	}
+
+	// With no default anywhere, empty still means any device -- which is what a
+	// one-controller project relies on, and what every existing asset contains.
+	{
+		UOscuMIDIMap* Anywhere = MakeMap({ Bind(TEXT("laser"), TEXT("Stop"), { NoteOn(1, TEXT("42")) }) });
+		FScopedActiveMap Only(Anywhere);
+
+		TestEqual(TEXT("No default and no source device accepts anything"),
+			MIDI->IngestNote(1, 42, 127, true, FName("Anything At All")), 1);
+		TestEqual(TEXT("...including nothing in particular"),
+			MIDI->IngestNote(1, 42, 127, true), 1);
+	}
+
 	return true;
 }
 
