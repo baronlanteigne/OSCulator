@@ -19,6 +19,16 @@ public class OSCulatorMIDI : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"MIDIDevice",
+
+
+			// PortMidi links statically and MIDIDevice exports none of its symbols,
+			// so this is a SECOND, private copy of the library -- not a route into
+			// the one MIDIDevice uses. That is only safe because this module starts
+			// and owns its copy end to end: Pm_Initialize here, Pm_OpenInput here,
+			// Pm_Close here. Borrowing a stream MIDIDevice opened and calling into
+			// this copy dereferences an uninitialised device table, which is exactly
+			// how the Pm_SetFilter crash happened.
+			"portmidi",
 		});
 
 		if (Target.bBuildEditor)

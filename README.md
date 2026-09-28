@@ -23,9 +23,14 @@ fifth.
 
 - **Call any Blueprint event over OSC or MIDI** by tagging its actor. Several actors
   can share a tag and all fire.
-- **MIDI note and CC mapping** through a Data Asset, with **MIDI Learn** — arm a row,
-  hit a pad. Auto-populate maps a whole level's events in one click, additively, so
-  it never disturbs mappings you have already made.
+- **MIDI note and CC mapping** through a Data Asset, written target-first: it lists what
+  is controllable, then you assign inputs. **Learn** captures the device, channel, note
+  or CC in one gesture. **Auto-Map** lists a whole level's events in one click and
+  assigns them from a per-tag layout, additively, so it never disturbs mappings you have
+  already made. Several maps run at once, so one asset per controller is an option.
+- **MIDI input OSCulator reads itself**, not through the engine's MIDI plugin — so clock
+  and other traffic you cannot use are dropped at the port rather than filling a queue
+  that is drained once a frame. On a running sequencer, clock alone was 68% of the wire.
 - **Send OSC and MIDI from Blueprint**, to as many destinations as you configure.
   `Send MIDI Note` releases the note automatically after a tweakable duration, so a
   stuck note is not one Delay node away.
@@ -66,7 +71,8 @@ Source/                           the host project module
 Only `Plugins/OSCulator` is needed in your own project.
 
 31 automation tests cover the codec, registry, marshalling, dispatch, networking,
-coalescing, MIDI note names, ingest and auto-populate. Run them with:
+coalescing, MIDI note names, ingest, value shaping, auto-map and the port filters.
+Run them with:
 
 ```
 UnrealEditor-Cmd.exe <project>.uproject -ExecCmds="Automation RunTests OSCulator;Quit" ^

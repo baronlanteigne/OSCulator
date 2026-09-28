@@ -5,12 +5,13 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "OscuMIDIMap.h"
+#include "OscuMIDIPort.h"
 #include "Subsystems/EngineSubsystem.h"
 #include "OscuMIDISubsystem.generated.h"
 
-class UMIDIDeviceInputController;
 class UMIDIDeviceOutputController;
 class UWorld;
+struct FMIDIDeviceInfo;
 
 /** One opened output device, paired with the name it was configured under. */
 USTRUCT()
@@ -69,33 +70,44 @@ public:
 	/** Closes whatever is open, then re-reads settings and opens again. */
 	void Restart();
 
-	bool IsOpen() const { return Controllers.Num() > 0; }
-	int32 GetOpenDeviceCount() const { return Controllers.Num(); }
-	UOscuMIDIMap* GetActiveMap() const { return ActiveMap; }
+	bool IsOpen() const { return Ports.Num() > 0; }
+	int32 GetOpenDeviceCount() const { return Ports.Num(); }
 
-	/** Overrides the configured map. For tests and for Learn. */
-	void SetActiveMap(UOscuMIDIMap* Map) { ActiveMap = Map; }
+	/** The open input ports, for the status command to describe. */
+	const TArray<FOscuMIDIPort>& GetPorts() const { return Ports; }
+	/**
+	 * Every loaded map, all consulted on every message.
+	 *
+	 * A list because how the mapping is split is the author's choice -- one asset per
+	 * device, one per show, or one for everything -- and none of those should be a
+	 * different code path here.
+	 */
+	const TArray<TObjectPtr<UOscuMIDIMap>>& GetActiveMaps() const { return ActiveMaps; }
 
-	uint64 GetNotesReceived() const { return NotesReceived; }
-	uint64 GetNotesDispatched() const { return NotesDispatched; }
-	uint64 GetNotesUnmapped() const { return NotesUnmapped; }
+	/** Replaces the loaded set. For tests and for Learn. */
+	void SetActiveMaps(TArray<TObjectPtr<UOscuMIDIMap>> Maps) { ActiveMaps = MoveTemp(Maps); }
+
+	/** The one-map convenience over SetActiveMaps. */
+	void SetActiveMap(UOscuMIDIMap* Map);
+
+	uint64 GetMessagesReceived() const { return MessagesReceived; }
+	uint64 GetMessagesDispatched() const { return MessagesDispatched; }
+	uint64 GetMessagesUnmapped() const { return MessagesUnmapped; }
 
 	/**
 	 * The whole ingest path, minus the hardware.
 	 *
-	 * Public so a test can drive it without a physical controller -- everything
-	 * from here down is what a real note does.
+	 * Public so a test can drive it without a physical controller -- everything from
+	 * here down is what a real message does. Returns how many actors were called.
 	 *
-	 * Channel is 1-16, matching both the asset and what MIDIDevice delivers.
-	 * Returns how many actors were called.
+	 * One message may fire several bindings: sharing an input between two functions on
+	 * two different actors is a feature, not an authoring mistake.
 	 */
-	int32 IngestNote(int32 Channel, int32 Note, int32 Velocity, bool bNoteOn);
+	int32 IngestMessage(FName Device, const FOscuMIDIMessage& Message);
 
-	UFUNCTION()
-	void HandleNoteOn(UMIDIDeviceInputController* Controller, int32 Timestamp, int32 Channel, int32 Note, int32 Velocity);
-
-	UFUNCTION()
-	void HandleNoteOff(UMIDIDeviceInputController* Controller, int32 Timestamp, int32 Channel, int32 Note, int32 Velocity);
+	/** Channel is 1-16. Convenience over IngestMessage, for tests and for callers. */
+	int32 IngestNote(int32 Channel, int32 Note, int32 Velocity, bool bNoteOn, FName Device = NAME_None);
+	int32 IngestControlChange(int32 Channel, int32 ControlNumber, int32 Value, FName Device = NAME_None);
 
 	// ---- Output ----
 
@@ -134,7 +146,7 @@ public:
 	 * outside play -- Learn only works because the devices are already open, so it
 	 * is a redirection rather than a second listener.
 	 */
-	void ArmLearn(UOscuMIDIMap* Map, int32 ChannelIndex, int32 NoteIndex);
+	void ArmLearn(UOscuMIDIMap* Map, int32 BindingIndex, int32 SourceIndex);
 
 	/** Disarms, but only if this map is the one currently armed. */
 	void CancelLearn(const UOscuMIDIMap* Map);
@@ -146,17 +158,34 @@ private:
 	void OpenDevices();
 	void CloseDevices();
 
+	/** Reads every open port and ingests what it finds. Called from Tick. */
+	void DrainPorts();
+
+	/** The channel mask the settings ask for, or all channels while Learn is armed. */
+	int32 CurrentChannelMask() const;
+
 	/** The playing world, or null when only the editor is up. */
 	UWorld* FindDispatchWorld() const;
 
-	void OpenOutputs();
+	/**
+	 * Takes an already-enumerated list, because UMIDIDeviceManager::FindAllMIDIDeviceInfo
+	 * is not a read: it terminates the engine's PortMidi copy, brings it back, and
+	 * restarts every controller it can still reach through TObjectIterator. Calling it
+	 * once per restart rather than once per half keeps that churn to a minimum. Input
+	 * no longer goes through it at all.
+	 */
+	void OpenOutputs(const TArray<FMIDIDeviceInfo>& OutputDevices);
 	void CloseOutputs();
 
 	/** Drains due note-offs. Engine-level, so it survives PIE stopping. */
 	bool Tick(float DeltaTime);
 
-	UPROPERTY()
-	TArray<TObjectPtr<UMIDIDeviceInputController>> Controllers;
+	/**
+	 * Plain structs, not UObjects: a port is a PortMidi stream and a name, with no
+	 * reason to be garbage collected or replicated. They are closed explicitly in
+	 * CloseDevices and in Deinitialize.
+	 */
+	TArray<FOscuMIDIPort> Ports;
 
 	UPROPERTY()
 	TArray<FOscuMIDIOutput> Outputs;
@@ -165,27 +194,27 @@ private:
 	FTSTicker::FDelegateHandle TickerHandle;
 
 	UPROPERTY()
-	TObjectPtr<UOscuMIDIMap> ActiveMap;
+	TArray<TObjectPtr<UOscuMIDIMap>> ActiveMaps;
 
 	FDelegateHandle PostEngineInitHandle;
 	FDelegateHandle SettingsChangedHandle;
 
-	/** The first note is logged in full, to confirm the channel numbering against
+	/** The first message is logged in full, to confirm the channel numbering against
 	 *  real hardware. Ten seconds of noise against an hour of "why does nothing
 	 *  trigger". */
-	bool bLoggedFirstNote = false;
+	bool bLoggedFirstMessage = false;
 
-	uint64 NotesReceived = 0;
-	uint64 NotesDispatched = 0;
-	uint64 NotesUnmapped = 0;
+	uint64 MessagesReceived = 0;
+	uint64 MessagesDispatched = 0;
+	uint64 MessagesUnmapped = 0;
 
 #if WITH_EDITOR
-	/** Writes the note into the armed row. True if it consumed the note. */
-	bool ApplyLearn(int32 Channel, int32 Note);
+	/** Writes the input into the armed source. True if it consumed the message. */
+	bool ApplyLearn(FName Device, const FOscuMIDIMessage& Message);
 
 	/** Weak: the asset can be closed or reimported while a row sits armed. */
 	TWeakObjectPtr<UOscuMIDIMap> LearnMap;
-	int32 LearnChannelIndex = INDEX_NONE;
-	int32 LearnNoteIndex = INDEX_NONE;
+	int32 LearnBindingIndex = INDEX_NONE;
+	int32 LearnSourceIndex = INDEX_NONE;
 #endif
 };

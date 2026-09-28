@@ -102,58 +102,100 @@ Project Settings; there is no picker.
 
 ```
 [OSCulator] MIDI devices. Copy a name verbatim into Project Settings.
-  Inputs (1):
-    "LPD8"
+  Inputs (3):
+    "UE2TD"
+    "TD2UE"
+    "Elektron TM-1"   [open by OSCulator]
   Outputs (2):
     "LPD8"
-    "loopMIDI Port"   [already in use by another application]
+    "loopMIDI Port"   [already in use]
 ```
 
-`Inputs (0)` means nothing is reaching Unreal at all — a driver or cabling problem,
-not a settings one.
+Inputs are enumerated through OSCulator's own PortMidi instance — the one that will
+actually open them — so `[open by OSCulator]` means this session holds it. Outputs come
+from the engine's MIDIDevice plugin, and its "already in use" flag only ever sees the
+current process.
+
+`Inputs (0)` means nothing is reaching Unreal at all — a driver or cabling problem, not a
+settings one.
 
 ### `OSCulator.MIDIStatus` — editor too
 
-Which devices are open, which map is active, every mapping in it, and the counters.
+Which ports are open and what they are filtering, every active map with every binding,
+and the counters.
 
 ```
 [OSCulator] MIDI devices open: 1
-  Map: DA_LiveMap (1 channel(s), 3 mapping(s))
-    channel 1 -> /test
-      C1     ( 36) -> Aim
-      C#1    ( 37) -> Fire
-      D1     ( 38) -> Stop
-  notes  received 12, dispatched 9, unmapped 3
+  filter: ignoring clock, timecode, transport, sysex
+  'Elektron TM-1': queue 1024, ignoring clock, timecode, transport, sysex, all channels
+     unused messages 0, queue overflows 0
+  Map: DA_Pads [Elektron TM-1] (4 binding(s), 3 assigned, 1 unassigned)
+    laser/Aim   <- Note  ch 1  C1 (36)
+    laser/Fire  <- Note  ch 1  C#1 (37)
+    laser/Level <- CC    ch 1  #7 (+1 more)
+    laser/Stop   -- unassigned
+  messages  received 12, dispatched 9, unmapped 3
 ```
 
-Reading the counters:
+Reading it:
 
 | Symptom | Means |
 | --- | --- |
 | received 0 | The device is not delivering. Check `OSCulator.MIDIDevices` |
-| received > 0, unmapped > 0 | Delivering, but on a channel or note the map does not cover |
-| dispatched 0 with mappings present | The tag has no actors, or the function is not exposed |
+| received > 0, unmapped > 0 | Delivering, but on an input no binding claims |
+| dispatched 0 with bindings present | The tag has no actors, or the function is not exposed |
+| `-- unassigned` | The binding exists but nothing fires it yet. Normal after Auto-Map |
+| queue overflows > 0 | Messages were lost. Raise the queue size, or narrow Listen For or the channel list |
+| unused messages climbing | Something is getting through Listen For that no binding uses |
+
+### `OSCulator.MIDIValidate` — editor too
+
+Checks every active map against the open level, then reports inputs claimed by more than
+one binding **across all maps at once** — which is the one thing the asset's own
+**Validate Against Level** button cannot see, since it only knows its own bindings.
+
+```
+[OSCulator] DA_Pads: 3 ok, 1 broken, 0 for another level, 1 unassigned. See the log for detail.
+[OSCulator] DA_Knobs: 6 ok, 0 broken, 0 for another level, 0 unassigned. See the log for detail.
+[OSCulator] Inputs driving more than one binding (legal -- one pad, several actors -- but worth a look):
+  ch 1 note 36:
+      laser/Stop   [DA_Pads, Elektron TM-1]
+      cube/Flash   [DA_Knobs, any device]
+```
+
+Sharing an input is a feature, so this reports rather than warns. Two per-device maps
+reusing the same note number are **not** listed — their devices cannot both match one
+message. A source with no device is listed against everything on that number, because an
+empty device accepts any.
+
+The per-map detail — which functions are missing, and which the level exposes that
+nothing claims — goes to the log, where it is too long for a console line.
 
 ### `OSCulator.MIDIRestart`
 
-Closes and reopens the MIDI devices, re-reading settings. Settings edits already do
-this automatically; this is the manual retry.
+Closes and reopens the MIDI devices, re-reading settings. Settings edits already do this
+automatically; this is the manual retry.
 
 Also the way to **release a port back to another application** without restarting —
 disable MIDI input, restart, and the port is free.
 
 ### `OSCulator.MIDIMonitor 0|1`
 
-Logs **every** incoming note with its raw channel, note number and resolved name.
+Logs **every** incoming message with its device, raw channel, number and resolved note
+name.
 
 ```
-MIDI in: channel=1 note=37 (C#1) velocity=100 on
+MIDI in [Elektron TM-1]: channel=1 note=37 (C#1) velocity=100 on
+MIDI in [Midi Fighter Twister]: channel=1 CC=7 value=64
 ```
 
-This is the tool for *"is the note I think I am sending the note that arrives?"* —
-which no amount of reading the map can settle, because senders disagree about whether
-their note labels are 0-based or 1-based. TouchDesigner's are 1-based, so its `n38`
-arrives here as 37.
+This is the tool for *"is the note I think I am sending the note that arrives?"* — which
+no amount of reading the map can settle, because senders disagree about whether their
+note labels are 0-based or 1-based. TouchDesigner's are 1-based, so its `n38` arrives
+here as 37.
+
+The device name is printed because a binding can require one, and a mapping that never
+fires is often a mapping listening to the wrong box.
 
 Off by default. Leave it off during a show.
 
