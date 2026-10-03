@@ -105,6 +105,12 @@ void UOscuMIDISubsystem::Restart()
 	// Release anything sounding before the devices go away underneath it.
 	FlushPendingNoteOffs();
 
+	// A settings change comes through here, and Performance Mode is a setting -- so
+	// flipping it, either way, cannot leave a remembered slot behind. Also covers the
+	// case where a map asset was repointed at a different tag or function.
+	ParamSlotCache.Reset();
+	WarnedUnresolvedParams.Reset();
+
 	CloseDevices();
 	CloseOutputs();
 
@@ -376,65 +382,81 @@ void UOscuMIDISubsystem::OpenDevices()
 		}
 	}
 
-	if (Settings.MIDIInputDeviceNames.Num() == 0)
+	if (Settings.MIDIInputDevices.Num() == 0)
 	{
 		UE_LOG(LogOSCulator, Warning,
-			TEXT("MIDI input is enabled but no device names are listed in Project Settings > Plugins > OSCulator."));
+			TEXT("MIDI input is enabled but no devices are listed in Project Settings > Plugins > OSCulator."));
 		return;
 	}
 
-	const int32 FilterMask = OscuMIDI::BuildFilterMask(Settings.MIDIInputMessages);
-	const int32 ChannelMask = CurrentChannelMask();
 	const int32 QueueSize = FMath::Clamp(Settings.MIDIInputQueueSize, 64, 16384);
 
 	// Says out loud what is about to be attempted, so "0 devices open" is never a
-	// mystery -- the reason is always the next line or two of the log.
-	UE_LOG(LogOSCulator, Log,
-		TEXT("MIDI input: opening %d configured device(s). Queue %d message(s); ignoring %s; %s."),
-		Settings.MIDIInputDeviceNames.Num(), QueueSize,
-		*OscuMIDI::DescribeFilterMask(FilterMask), *OscuMIDI::DescribeChannelMask(ChannelMask));
+	// mystery -- the reason is always the next line or two of the log. Neither filter is
+	// named here, because both are per device now; each device's open line carries its
+	// own, which is the only place they mean anything.
+	UE_LOG(LogOSCulator, Log, TEXT("MIDI input: opening %d configured device(s). Queue %d message(s) each."),
+		Settings.MIDIInputDevices.Num(), QueueSize);
 
-	if (!Settings.MIDIInputMessages.bNotes)
+	for (const FOscuMIDIInputDevice& Wanted : Settings.MIDIInputDevices)
 	{
-		// Legal, and possibly deliberate, but it switches off everything a map asset
-		// can currently address. Better said here than discovered by playing a pad and
-		// getting nothing.
-		UE_LOG(LogOSCulator, Warning,
-			TEXT("MIDI input is not listening for notes -- untick 'Notes' under Listen For to change that. No mapping can fire and Learn will not work."));
-	}
-
-	for (const FString& Wanted : Settings.MIDIInputDeviceNames)
-	{
-		FOscuMIDIPort Port;
-		FString Error;
-
-		if (!Port.Open(Wanted, QueueSize, FilterMask, ChannelMask, Error))
+		if (Wanted.Name.IsEmpty())
 		{
-			// One bad device must not take the others down with it.
-			UE_LOG(LogOSCulator, Warning, TEXT("MIDI input device '%s' %s"), *Wanted, *Error);
+			// A freshly added array row. Worth a line rather than a silent skip, because
+			// "I added my device and nothing happened" usually means the name was never
+			// typed in.
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("MIDI input: a device entry has no name and was skipped. Run OSCulator.MIDIDevices to list what is available."));
 			continue;
 		}
 
-		UE_LOG(LogOSCulator, Log, TEXT("MIDI input open: '%s' (device %d)."), *Port.Name, Port.DeviceID);
+		// Both built per device, because both are statements about one piece of hardware.
+		// Learn lifts the channel mask afterwards and puts it back; the filter is left
+		// alone, since a device told not to send notes has nothing to teach.
+		const int32 FilterMask = OscuMIDI::BuildFilterMask(Wanted.ListenFor);
+		const int32 ChannelMask = OscuMIDI::BuildChannelMaskIgnoring(Wanted.IgnoredChannels, Wanted.Name);
+
+		if (!Wanted.ListenFor.bNotes)
+		{
+			// Legal, and possibly deliberate, but it switches off everything a map asset
+			// can currently address FOR THIS DEVICE. Better said here than discovered by
+			// playing a pad and getting nothing. Named per device, because with the
+			// filter per device the interesting case is one box out of three being deaf.
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("MIDI input '%s' is not listening for notes -- tick 'Notes' under its Listen For to change that. No mapping can fire from this device and Learn will not work on it."),
+				*Wanted.Name);
+		}
+
+		FOscuMIDIPort Port;
+		FString Error;
+
+		if (!Port.Open(Wanted.Name, QueueSize, FilterMask, ChannelMask, Error))
+		{
+			// One bad device must not take the others down with it.
+			UE_LOG(LogOSCulator, Warning, TEXT("MIDI input device '%s' %s"), *Wanted.Name, *Error);
+			continue;
+		}
+
+		UE_LOG(LogOSCulator, Log, TEXT("MIDI input open: '%s' (device %d), dropping %s, listening on %s."),
+			*Port.Name, Port.DeviceID,
+			*OscuMIDI::DescribeFilterMask(Port.GetFilterMask()),
+			*OscuMIDI::DescribeChannelMask(Port.GetChannelMask()));
+
+#if WITH_EDITOR
+		// Opened mid-Learn -- a settings edit while a row is armed restarts the
+		// subsystem. The port would otherwise come up with its configured mask on and
+		// quietly refuse to teach a muted channel.
+		if (LearnMap.IsValid())
+		{
+			Port.SetChannelMask(0xFFFF);
+		}
+#endif
+
 		Ports.Add(MoveTemp(Port));
 	}
 
 	UE_LOG(LogOSCulator, Log, TEXT("MIDI input: %d of %d configured device(s) opened."),
-		Ports.Num(), Settings.MIDIInputDeviceNames.Num());
-}
-
-int32 UOscuMIDISubsystem::CurrentChannelMask() const
-{
-#if WITH_EDITOR
-	// Learn has to be able to hear a channel the settings normally mute, or teaching
-	// it a note from an unlisted channel is impossible in a way nobody would guess at.
-	if (LearnMap.IsValid())
-	{
-		return 0xFFFF;
-	}
-#endif
-
-	return OscuMIDI::BuildChannelMask(UOscuSettings::Get()->MIDIInputChannels);
+		Ports.Num(), Settings.MIDIInputDevices.Num());
 }
 
 void UOscuMIDISubsystem::DrainPorts()
@@ -509,12 +531,30 @@ UWorld* UOscuMIDISubsystem::FindDispatchWorld() const
 
 void UOscuMIDISubsystem::ArmLearn(UOscuMIDIMap* Map, const int32 BindingIndex, const int32 SourceIndex)
 {
+	if (UOscuSettings::Get()->bPerformanceMode)
+	{
+		// Refused out loud. A Learn tickbox that quietly did nothing would be a
+		// miserable thing to debug, and the setting that caused it is not in the asset
+		// you are looking at -- so the message names it.
+		UE_LOG(LogOSCulator, Warning,
+			TEXT("MIDI Learn is disabled: Performance Mode is on in Project Settings > Plugins > OSCulator. Untick it to teach inputs again."));
+
+		if (Map != nullptr && Map->Bindings.IsValidIndex(BindingIndex)
+			&& Map->Bindings[BindingIndex].Sources.IsValidIndex(SourceIndex))
+		{
+			// Untick it again, or the row sits there claiming to be armed.
+			Map->Bindings[BindingIndex].Sources[SourceIndex].bLearn = false;
+		}
+		return;
+	}
+
 	LearnMap = Map;
 	LearnBindingIndex = BindingIndex;
 	LearnSourceIndex = SourceIndex;
 
-	// Lifted for the duration, so an input can be learned from a channel the settings
-	// normally drop at the port. Restored in CancelLearn.
+	// Lifted on every port for the duration, so an input can be learned from a channel
+	// that device is configured to drop. Each port remembers its own mask, so
+	// CancelLearn restores one answer per port rather than a single project-wide one.
 	for (FOscuMIDIPort& Port : Ports)
 	{
 		Port.SetChannelMask(0xFFFF);
@@ -542,12 +582,11 @@ void UOscuMIDISubsystem::CancelLearn(const UOscuMIDIMap* Map)
 	LearnBindingIndex = INDEX_NONE;
 	LearnSourceIndex = INDEX_NONE;
 
-	// Back to whatever the settings asked for, now that nothing is listening for a
-	// stray channel.
-	const int32 Mask = CurrentChannelMask();
+	// Each port back to its own configured mask, now that nothing is listening for a
+	// stray channel. Per port, because the lists are per device.
 	for (FOscuMIDIPort& Port : Ports)
 	{
-		Port.SetChannelMask(Mask);
+		Port.RestoreChannelMask();
 	}
 }
 
@@ -579,25 +618,79 @@ bool UOscuMIDISubsystem::ApplyLearn(const FName Device, const FOscuMIDIMessage& 
 	// and the channel by hand afterwards is exactly the tedium Learn exists to remove.
 	Source.Device = Device;
 	Source.Channel = static_cast<uint8>(Message.Channel);
-	Source.Type = Message.Type;
 	Source.bLearn = false;
+
+	// The KIND goes on the binding, which is where it lives, and so applies to the whole
+	// row. Playing a knob at a row that was note-driven means the row is knob-driven now
+	// -- that is what the gesture said. But it re-points the row's other sources too, and
+	// their numbers are reinterpreted, so a row that had others is told about it rather
+	// than quietly rewritten.
+	if (Binding.Type != Message.Type && Binding.Sources.Num() > 1)
+	{
+		const auto KindName = [](const EOscuMIDIInputType Kind) -> const TCHAR*
+		{
+			switch (Kind)
+			{
+			case EOscuMIDIInputType::Note:          return TEXT("notes");
+			case EOscuMIDIInputType::ControlChange:  return TEXT("control change");
+			default:                                 return TEXT("program change");
+			}
+		};
+
+		UE_LOG(LogOSCulator, Warning,
+			TEXT("Learn changed %s/%s from %s to %s, which re-points its other %d source(s) -- their numbers are reinterpreted. Undo if that was not the intent."),
+			*Binding.Tag.ToString(), *Binding.FunctionName.ToString(),
+			KindName(Binding.Type), KindName(Message.Type), Binding.Sources.Num() - 1);
+	}
+	Binding.Type = Message.Type;
+	Source.Type = Message.Type;
 
 	if (Message.Type == EOscuMIDIInputType::Note)
 	{
 		const int32 MiddleCOctave = UOscuSettings::Get()->MiddleCOctave;
 		Source.ResolvedNote = static_cast<uint8>(Message.Number);
 		Source.Note = OscuMIDINoteName::ToString(static_cast<uint8>(Message.Number), MiddleCOctave);
+
+		// On a range source, one gesture can only be one end of the span, and the
+		// bottom is the useful end to capture. If that lands above the current top, the
+		// top comes with it rather than being left inverted -- Refresh would otherwise
+		// swap the pair and quietly make the note you just played the TOP of the span,
+		// which is the opposite of what pressing it meant.
+		if (Source.bNoteRange && Source.ResolvedNoteHigh < Source.ResolvedNote)
+		{
+			Source.ResolvedNoteHigh = Source.ResolvedNote;
+			Source.NoteHigh = Source.Note;
+
+			UE_LOG(LogOSCulator, Log,
+				TEXT("Learn set the bottom of a note range to %s (%d); its top came with it. Set Note High to open the span."),
+				*Source.Note, Message.Number);
+		}
+	}
+	else if (Message.Type == EOscuMIDIInputType::ProgramChange)
+	{
+		Source.ProgramNumber = static_cast<uint8>(Message.Number);
 	}
 	else
 	{
 		Source.ControlNumber = static_cast<uint8>(Message.Number);
 	}
 
+	FString What;
+	switch (Message.Type)
+	{
+	case EOscuMIDIInputType::Note:
+		What = FString::Printf(TEXT("note %s (%d)"), *Source.Note, Message.Number);
+		break;
+	case EOscuMIDIInputType::ProgramChange:
+		What = FString::Printf(TEXT("program %d"), Message.Number);
+		break;
+	default:
+		What = FString::Printf(TEXT("CC %d"), Message.Number);
+		break;
+	}
+
 	UE_LOG(LogOSCulator, Log, TEXT("Learned %s on channel %d for %s/%s."),
-		Message.Type == EOscuMIDIInputType::Note
-			? *FString::Printf(TEXT("note %s (%d)"), *Source.Note, Message.Number)
-			: *FString::Printf(TEXT("CC %d"), Message.Number),
-		Message.Channel, *Binding.Tag.ToString(), *Binding.FunctionName.ToString());
+		*What, Message.Channel, *Binding.Tag.ToString(), *Binding.FunctionName.ToString());
 
 	CancelLearn(Map);
 
@@ -646,6 +739,96 @@ int32 UOscuMIDISubsystem::IngestControlChange(const int32 Channel, const int32 C
 	return IngestMessage(Device, Message);
 }
 
+int32 UOscuMIDISubsystem::ResolveParamSlot(
+	const UOscuRouterSubsystem& Router, const FOscuMIDIBinding& Binding, const FName ParamName)
+{
+	if (ParamName.IsNone())
+	{
+		return INDEX_NONE;
+	}
+
+	if (!UOscuSettings::ShouldCacheSignatureFacts())
+	{
+		// The live answer, every message. A recompile that reorders parameters is
+		// followed rather than silently mismatched, which is the whole reason this is
+		// not cached by default while someone is still editing.
+		return Router.FindParamSlot(Binding.Tag, Binding.FunctionName, ParamName);
+	}
+
+	const uint32 Key = HashCombine(
+		HashCombine(GetTypeHash(Binding.Tag), GetTypeHash(Binding.FunctionName)),
+		GetTypeHash(ParamName));
+
+	if (const int32* Cached = ParamSlotCache.Find(Key))
+	{
+		return *Cached;
+	}
+
+	// A miss is cached too, INDEX_NONE and all: a name that does not resolve does not
+	// resolve on every message either, and re-asking the registry about it forever is
+	// exactly the cost this exists to avoid.
+	const int32 Slot = Router.FindParamSlot(Binding.Tag, Binding.FunctionName, ParamName);
+	ParamSlotCache.Add(Key, Slot);
+	return Slot;
+}
+
+void UOscuMIDISubsystem::WarnUnresolvedParam(
+	const FOscuMIDIBinding& Binding, const FName ParamName, const TCHAR* Role)
+{
+	const uint32 Key = HashCombine(
+		HashCombine(GetTypeHash(Binding.Tag), GetTypeHash(Binding.FunctionName)),
+		GetTypeHash(ParamName));
+
+	if (WarnedUnresolvedParams.Contains(Key))
+	{
+		return;
+	}
+	WarnedUnresolvedParams.Add(Key);
+
+	// Names what is available, because the whole failure mode here is a typo or a
+	// renamed pin, and both are fixed by seeing the real list.
+	FString Available = TEXT("(nothing tagged exposes that function)");
+
+	if (const UOscuRouterSubsystem* Router = UOscuRouterSubsystem::Get(FindDispatchWorld()))
+	{
+		TArray<FOscuExposedParamInfo> Params;
+		TArray<int32> Slots;
+		if (Router->DescribeParams(Binding.Tag, Binding.FunctionName, Params, Slots))
+		{
+			TArray<FString> Names;
+			for (int32 Index = 0; Index < Params.Num(); ++Index)
+			{
+				if (!Params[Index].bOutputOnly)
+				{
+					Names.Add(FString::Printf(TEXT("%s (%s)"),
+						*Params[Index].Name.ToString(), *Params[Index].TypeLabel));
+				}
+			}
+			Available = Names.Num() > 0
+				? FString::Join(Names, TEXT(", "))
+				: FString(TEXT("(that function takes no arguments)"));
+		}
+	}
+
+	UE_LOG(LogOSCulator, Warning,
+		TEXT("MIDI map: %s -> Parameter on /%s/%s names '%s', which that function does not have. "
+			 "That value is not being sent. Available: %s. Reported once."),
+		Role, *Binding.Tag.ToString(), *Binding.FunctionName.ToString(), *ParamName.ToString(), *Available);
+}
+
+int32 UOscuMIDISubsystem::IngestProgramChange(const int32 Channel, const int32 ProgramNumber, const FName Device)
+{
+	FOscuMIDIMessage Message;
+	Message.Type = EOscuMIDIInputType::ProgramChange;
+	Message.Channel = Channel;
+	Message.Number = ProgramNumber;
+
+	// Both, for the same reason the port decoder does it: there is no other payload, and
+	// a function that wants to know which program arrived should get it as the value.
+	Message.Value = ProgramNumber;
+	return IngestMessage(Device, Message);
+}
+
 int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessage& Message)
 {
 	++MessagesReceived;
@@ -664,6 +847,11 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 				*Device.ToString(), Message.Channel, Message.Number, *NoteName, Message.Value,
 				Message.bNoteOn ? TEXT("on") : TEXT("off"));
 		}
+		else if (Message.Type == EOscuMIDIInputType::ProgramChange)
+		{
+			UE_LOG(LogOSCulator, Log, TEXT("MIDI in [%s]: channel=%d program=%d"),
+				*Device.ToString(), Message.Channel, Message.Number);
+		}
 		else
 		{
 			UE_LOG(LogOSCulator, Log, TEXT("MIDI in [%s]: channel=%d CC=%d value=%d"),
@@ -676,7 +864,10 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 		bLoggedFirstMessage = true;
 		UE_LOG(LogOSCulator, Log,
 			TEXT("First MIDI message: device='%s' channel=%d %s=%d value=%d. Channels are numbered 1-16 here, matching the map asset."),
-			*Device.ToString(), Message.Channel, bIsNote ? TEXT("note") : TEXT("CC"), Message.Number, Message.Value);
+			*Device.ToString(), Message.Channel,
+			bIsNote ? TEXT("note")
+				: (Message.Type == EOscuMIDIInputType::ProgramChange ? TEXT("program") : TEXT("CC")),
+			Message.Number, Message.Value);
 	}
 
 	if (Message.Channel < 1 || Message.Channel > 16 || Message.Number < 0 || Message.Number > 127)
@@ -688,7 +879,13 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 	// Learn claims the message before anything else looks at it. A note only counts on
 	// press -- releasing a pad is not the note you meant -- but any controller movement
 	// will do, since a knob has no press.
-	if ((!bIsNote || Message.bNoteOn) && ApplyLearn(Device, Message))
+	//
+	// Performance Mode skips the check outright. Learn cannot be armed in that mode, so
+	// the weak-pointer test inside ApplyLearn would always fail -- but it would fail once
+	// per message, forever, to answer a question already settled by a setting.
+	if (!UOscuSettings::Get()->bPerformanceMode
+		&& (!bIsNote || Message.bNoteOn)
+		&& ApplyLearn(Device, Message))
 	{
 		return 0;
 	}
@@ -750,18 +947,80 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 		FOscuMessage Outgoing;
 		Outgoing.Address = FString::Printf(TEXT("/%s/%s"), *Binding.Tag.ToString(), *Binding.FunctionName.ToString());
 
-		if (Binding.bSendSourceNumber)
-		{
-			// Raw and never remapped: which control arrived is an identity, not a
-			// measurement.
-			Outgoing.Args.Add(FOscuValue::MakeFloat(static_cast<double>(Message.Number)));
-		}
-		Outgoing.Args.Add(FOscuValue::MakeFloat(Binding.ShapeValue(Raw)));
+		const bool bNamed = !Binding.VelocityParam.IsNone() || !Binding.PitchParam.IsNone();
 
-		// Lenient always. MIDI supplies one value regardless of what the signature
-		// wants: unfilled parameters keep the zeroes the initialised frame gave them,
-		// and a float landing in an int parameter is truncated by the marshal, which is
-		// what makes "remap to 0-10 and call an int function" work without a mode.
+		if (!bNamed)
+		{
+			// Byte for byte what this did before any of the naming existed. A binding
+			// that names nothing must not shift its arguments because the feature was
+			// added, so the untouched path stays literally untouched.
+			if (Binding.bSendSourceNumber)
+			{
+				// Raw and never remapped: which control arrived is an identity, not a
+				// measurement.
+				Outgoing.Args.Add(FOscuValue::MakeFloat(static_cast<double>(Message.Number)));
+			}
+			Outgoing.Args.Add(FOscuValue::MakeFloat(Binding.ShapeValue(Raw)));
+		}
+		else
+		{
+			// Named assignment. While the project is being edited, slots are resolved
+			// against the LIVE signature every message, so a Blueprint recompile that
+			// reorders parameters is followed instead of silently mismatched. In a cooked
+			// build, or with Performance Mode on, nothing can recompile and the answer is
+			// remembered instead -- see ResolveParamSlot.
+			int32 VelocitySlot = INDEX_NONE;
+			int32 PitchSlot = INDEX_NONE;
+
+			if (!Binding.VelocityParam.IsNone())
+			{
+				VelocitySlot = ResolveParamSlot(*Router, Binding, Binding.VelocityParam);
+				if (VelocitySlot == INDEX_NONE)
+				{
+					WarnUnresolvedParam(Binding, Binding.VelocityParam, TEXT("Velocity"));
+				}
+			}
+
+			if (!Binding.PitchParam.IsNone())
+			{
+				PitchSlot = ResolveParamSlot(*Router, Binding, Binding.PitchParam);
+				if (PitchSlot == INDEX_NONE)
+				{
+					WarnUnresolvedParam(Binding, Binding.PitchParam, TEXT("Pitch"));
+				}
+			}
+
+			// Sized to the furthest slot actually being written. Everything short of it
+			// is zero, which is what Lenient would have left in the frame anyway -- so
+			// filling the gaps costs nothing and keeps the message self-describing.
+			const int32 HighestSlot = FMath::Max(VelocitySlot, PitchSlot);
+			if (HighestSlot >= 0)
+			{
+				Outgoing.Args.Reserve(HighestSlot + 1);
+				for (int32 Slot = 0; Slot <= HighestSlot; ++Slot)
+				{
+					Outgoing.Args.Add(FOscuValue::MakeFloat(0.0));
+				}
+
+				if (VelocitySlot != INDEX_NONE)
+				{
+					Outgoing.Args[VelocitySlot] = FOscuValue::MakeFloat(Binding.ShapeValue(Raw));
+				}
+
+				if (PitchSlot != INDEX_NONE)
+				{
+					// A released note keeps its pitch -- which pad was let go is still
+					// the pad it was, unlike velocity, which has no meaning on release.
+					const double Fraction = Match.Source->GetPitchFraction(Message.Number);
+					Outgoing.Args[PitchSlot] = FOscuValue::MakeFloat(Binding.ShapePitch(Fraction, Message.Number));
+				}
+			}
+		}
+
+		// Lenient always. MIDI rarely supplies as many values as the signature wants:
+		// unfilled parameters keep the zeroes the initialised frame gave them, and a
+		// float landing in an int parameter is truncated by the marshal, which is what
+		// makes "remap to 0-10 and call an int function" work without a mode.
 		Calls += Router->DispatchMessage(Outgoing, EOscuArgPolicy::Lenient);
 	}
 

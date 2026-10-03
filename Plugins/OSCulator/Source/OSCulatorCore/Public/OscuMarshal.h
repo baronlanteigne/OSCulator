@@ -49,6 +49,28 @@ struct FOscuParamClass
 	/** How the parameter is described to a sender: "float", "vec3", "rot(pitch,yaw,roll)". */
 	FString TypeLabel;
 
+	/**
+	 * A single number that carries a MEASUREMENT, and so is worth pointing a knob at.
+	 *
+	 * True for float, int and byte. False for everything else, and the exclusions are
+	 * the interesting part:
+	 *
+	 *   - bool and enum are numbers in C++ and choices in meaning. Sweeping a
+	 *     controller across an enum picks nonsense on the way past, and across a bool
+	 *     it is a threshold nobody chose.
+	 *   - string, name and text take a value but not a magnitude.
+	 *   - vectors, rotators, colours and transforms are several numbers. Which of a
+	 *     vec3's three slots a knob should drive is a question with no default answer.
+	 *   - arrays are variadic, so "the parameter" is not one slot.
+	 *
+	 * Here rather than worked out again at each call site, because two places already
+	 * wanted it -- choosing note versus controller for auto-map, and choosing which
+	 * parameters MIDI velocity and pitch default to -- and both were reduced to
+	 * comparing TypeLabel against "float" and "int", which silently excluded byte and
+	 * would have drifted the moment the table grew a type.
+	 */
+	bool bContinuous = false;
+
 	/** Why it was rejected. Only meaningful when bMarshallable is false. */
 	FString RejectReason;
 };

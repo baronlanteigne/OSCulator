@@ -124,38 +124,50 @@ namespace OscuMIDI
 		return Mask;
 	}
 
-	int32 BuildChannelMask(const TArray<int32>& Channels)
+	int32 BuildChannelMaskIgnoring(const TArray<int32>& IgnoredChannels, const FString& DeviceName)
 	{
-		// PortMidi counts channels from 0; everything OSCulator shows the user counts
-		// from 1, matching the map asset and every DAW.
-		int32 Mask = 0;
-		TArray<FString> Ignored;
+		// Starts from all sixteen and clears what the device was told to drop, so the
+		// empty list -- the default, and what a device with nothing configured has --
+		// means "hear everything" without a special case.
+		int32 Mask = 0xFFFF;
+		TArray<FString> OutOfRange;
 
-		for (const int32 Channel : Channels)
+		for (const int32 Channel : IgnoredChannels)
 		{
 			if (Channel >= 1 && Channel <= 16)
 			{
-				Mask |= Pm_Channel(Channel - 1);
+				// PortMidi counts channels from 0; everything OSCulator shows the user
+				// counts from 1, matching the map asset and every DAW.
+				Mask &= ~Pm_Channel(Channel - 1);
 			}
 			else
 			{
 				// A freshly added array row starts at 0, so this is common rather than
-				// exotic. Said out loud, because the alternative is a channel list that
-				// quietly does not mean what it appears to.
-				Ignored.Add(FString::FromInt(Channel));
+				// exotic. Harmless in this direction -- it ignores nothing -- but said
+				// out loud, because a row that looks set and does nothing is its own
+				// kind of confusing.
+				OutOfRange.Add(FString::FromInt(Channel));
 			}
 		}
 
-		if (Ignored.Num() > 0)
+		if (OutOfRange.Num() > 0)
 		{
 			UE_LOG(LogOSCulator, Warning,
-				TEXT("MIDI input channel list: ignoring %s. Channels are numbered 1-16."),
-				*FString::Join(Ignored, TEXT(", ")));
+				TEXT("MIDI input '%s': ignored-channel entries %s are outside 1-16 and had no effect."),
+				*DeviceName, *FString::Join(OutOfRange, TEXT(", ")));
 		}
 
-		// No valid entries means every channel. A list of nothing but typos would
-		// otherwise mute the device and look exactly like broken hardware.
-		return Mask != 0 ? Mask : 0xFFFF;
+		if ((Mask & 0xFFFF) == 0)
+		{
+			// Taken at face value rather than second-guessed: all sixteen listed is a
+			// thing someone can mean. But it is indistinguishable from broken hardware
+			// from the outside, so it never happens silently.
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("MIDI input '%s': all sixteen channels are in Ignored Channels, so the device will be opened and hear nothing. Remove it from the device list instead if that was the intent."),
+				*DeviceName);
+		}
+
+		return Mask;
 	}
 
 	FString DescribeFilterMask(const int32 Mask)
@@ -212,17 +224,20 @@ namespace OscuMIDI
 			return FString(TEXT("all channels"));
 		}
 
-		TArray<FString> Channels;
+		// Phrased as what is missing, to match how it is configured: the setting is a
+		// list of channels to ignore, so a log line listing the survivors instead would
+		// have to be mentally inverted every time it is read.
+		TArray<FString> Ignored;
 		for (int32 Channel = 1; Channel <= 16; ++Channel)
 		{
-			if ((Mask & Pm_Channel(Channel - 1)) != 0)
+			if ((Mask & Pm_Channel(Channel - 1)) == 0)
 			{
-				Channels.Add(FString::FromInt(Channel));
+				Ignored.Add(FString::FromInt(Channel));
 			}
 		}
 
-		return Channels.Num() > 0
-			? FString::Printf(TEXT("channel(s) %s only"), *FString::Join(Channels, TEXT(", ")))
+		return Ignored.Num() < 16
+			? FString::Printf(TEXT("all channels except %s"), *FString::Join(Ignored, TEXT(", ")))
 			: FString(TEXT("no channels at all"));
 	}
 }
@@ -308,6 +323,10 @@ bool FOscuMIDIPort::Open(const FString& DeviceName, const int32 QueueSize, const
 		ChannelMask = 0xFFFF;
 	}
 
+	// Remembered so Learn can lift the mask and put back THIS device's own one. Each
+	// port carries a different mask now, so there is no single value to recompute from.
+	ConfiguredChannelMask = ChannelMask;
+
 	return true;
 }
 
@@ -342,6 +361,11 @@ void FOscuMIDIPort::SetChannelMask(const int32 InChannelMask)
 	}
 }
 
+void FOscuMIDIPort::RestoreChannelMask()
+{
+	SetChannelMask(ConfiguredChannelMask);
+}
+
 int32 FOscuMIDIPort::Drain(const TFunctionRef<void(const FOscuMIDIMessage&)>& OnMessage)
 {
 	if (Stream == nullptr)
@@ -371,7 +395,7 @@ int32 FOscuMIDIPort::Drain(const TFunctionRef<void(const FOscuMIDIMessage&)>& On
 				// engine's version of this message, this one says what to do about it.
 				++Overflows;
 				UE_LOG(LogOSCulator, Warning,
-					TEXT("MIDI input '%s' overflowed its %d-message queue and was flushed; messages were lost. Raise the queue size, or narrow the input filter or channel list, in Project Settings > Plugins > OSCulator."),
+					TEXT("MIDI input '%s' overflowed its %d-message queue and was flushed; messages were lost. Raise the queue size, or narrow this device's own Listen For or Ignored Channels, in Project Settings > Plugins > OSCulator."),
 					*Name, UOscuSettings::Get()->MIDIInputQueueSize);
 			}
 			else
@@ -423,6 +447,18 @@ int32 FOscuMIDIPort::Drain(const TFunctionRef<void(const FOscuMIDIMessage&)>& On
 
 			case 0xB0:
 				Decoded.Type = EOscuMIDIInputType::ControlChange;
+				OnMessage(Decoded);
+				break;
+
+			case 0xC0:
+				Decoded.Type = EOscuMIDIInputType::ProgramChange;
+
+				// One data byte, not two. Data2 is undefined on the wire for this
+				// status, so the program number is carried as BOTH the number a source
+				// matches on and the value a function receives -- there is nothing else
+				// to put there, and a function that wants to know which program arrived
+				// should not have to ask for it through a separate setting.
+				Decoded.Value = Data1;
 				OnMessage(Decoded);
 				break;
 

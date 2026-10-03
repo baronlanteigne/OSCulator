@@ -10,6 +10,7 @@
 #include "OscuMIDISubsystem.generated.h"
 
 class UMIDIDeviceOutputController;
+class UOscuRouterSubsystem;
 class UWorld;
 struct FMIDIDeviceInfo;
 
@@ -109,6 +110,14 @@ public:
 	int32 IngestNote(int32 Channel, int32 Note, int32 Velocity, bool bNoteOn, FName Device = NAME_None);
 	int32 IngestControlChange(int32 Channel, int32 ControlNumber, int32 Value, FName Device = NAME_None);
 
+	/**
+	 * A program change carries one number and nothing else.
+	 *
+	 * No value parameter, because there is no second data byte to supply: the program
+	 * number is both what a source matches on and what a function receives.
+	 */
+	int32 IngestProgramChange(int32 Channel, int32 ProgramNumber, FName Device = NAME_None);
+
 	// ---- Output ----
 
 	/**
@@ -161,9 +170,6 @@ private:
 	/** Reads every open port and ingests what it finds. Called from Tick. */
 	void DrainPorts();
 
-	/** The channel mask the settings ask for, or all channels while Learn is armed. */
-	int32 CurrentChannelMask() const;
-
 	/** The playing world, or null when only the editor is up. */
 	UWorld* FindDispatchWorld() const;
 
@@ -207,6 +213,36 @@ private:
 	uint64 MessagesReceived = 0;
 	uint64 MessagesDispatched = 0;
 	uint64 MessagesUnmapped = 0;
+
+	/**
+	 * Says once that a named parameter does not resolve, then stops.
+	 *
+	 * A name that matches nothing matches nothing on every message, so the unthrottled
+	 * version of this warning is a wall of identical lines at the message rate -- which
+	 * buries the one line that mattered and costs more than the dispatch it is
+	 * complaining about. Keyed by tag, function and parameter name, so three different
+	 * mistakes still produce three different lines.
+	 */
+	void WarnUnresolvedParam(const FOscuMIDIBinding& Binding, FName ParamName, const TCHAR* Role);
+
+	TSet<uint32> WarnedUnresolvedParams;
+
+	/**
+	 * Resolved parameter slots, when they are allowed to be remembered.
+	 *
+	 * Only consulted while UOscuSettings::ShouldCacheSignatureFacts() is true -- a
+	 * cooked build, or Performance Mode. The reason the slot is normally re-derived per
+	 * message is that a Blueprint could be recompiled underneath us and reorder its
+	 * parameters; where that cannot happen, re-deriving it was only ever waste.
+	 *
+	 * Keyed by tag, function and parameter name, and cleared on Restart -- which a
+	 * settings change triggers, so flipping Performance Mode cannot leave a stale answer
+	 * behind.
+	 */
+	TMap<uint32, int32> ParamSlotCache;
+
+	/** The slot for a named parameter, from the cache when caching is allowed. */
+	int32 ResolveParamSlot(const UOscuRouterSubsystem& Router, const FOscuMIDIBinding& Binding, FName ParamName);
 
 #if WITH_EDITOR
 	/** Writes the input into the armed source. True if it consumed the message. */

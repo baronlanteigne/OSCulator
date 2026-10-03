@@ -21,12 +21,19 @@ namespace
 		return Property->GetClass()->GetName();
 	}
 
-	FOscuParamClass MakeAccepted(int32 ArgCount, FString TypeLabel)
+	/**
+	 * bContinuous defaults to false, so a new type is a CHOICE rather than an accident:
+	 * adding one to the table leaves it non-continuous until someone says it carries a
+	 * magnitude. The alternative default would silently enrol the next struct anyone
+	 * added into "things a knob can drive".
+	 */
+	FOscuParamClass MakeAccepted(int32 ArgCount, FString TypeLabel, bool bContinuous = false)
 	{
 		FOscuParamClass Result;
 		Result.bMarshallable = true;
 		Result.ArgCount = ArgCount;
 		Result.TypeLabel = MoveTemp(TypeLabel);
+		Result.bContinuous = bContinuous;
 		return Result;
 	}
 
@@ -211,16 +218,16 @@ namespace OscuMarshal
 		// the two classes are siblings, so the order is documentation, not behaviour.
 		if (CastField<FDoubleProperty>(Property))
 		{
-			return MakeAccepted(1, TEXT("float"));
+			return MakeAccepted(1, TEXT("float"), /*bContinuous*/ true);
 		}
 		if (CastField<FFloatProperty>(Property))
 		{
-			return MakeAccepted(1, TEXT("float"));
+			return MakeAccepted(1, TEXT("float"), /*bContinuous*/ true);
 		}
 
 		if (CastField<FIntProperty>(Property) || CastField<FInt64Property>(Property))
 		{
-			return MakeAccepted(1, TEXT("int"));
+			return MakeAccepted(1, TEXT("int"), /*bContinuous*/ true);
 		}
 
 		// Bitfields cannot be memcpy'd, so the fill side must go through
@@ -236,7 +243,9 @@ namespace OscuMarshal
 			{
 				return MakeAccepted(1, FString::Printf(TEXT("enum(%s)"), *AsByte->Enum->GetName()));
 			}
-			return MakeAccepted(1, TEXT("byte"));
+			// A plain byte is a 0-255 magnitude. Its enum-backed sibling above is not,
+			// which is the whole reason the two are tested separately.
+			return MakeAccepted(1, TEXT("byte"), /*bContinuous*/ true);
 		}
 
 		if (const FEnumProperty* AsEnum = CastField<FEnumProperty>(Property))
@@ -416,8 +425,10 @@ namespace OscuMarshal
 			// zeroed, initialised frame already holds 0 and "", which is the whole
 			// specified behaviour: Blueprint parameter defaults live in editor-only
 			// metadata and are baked into the call node, so ProcessEvent never
-			// applies them. An author who wants a MIDI-triggerable event should put
-			// the velocity-relevant parameter first.
+			// applies them. Declaration order used to mean a MIDI-driven event had to
+			// put its velocity parameter first; a MIDI binding can now name the
+			// parameter it drives instead, so the signature is free to read however
+			// suits the event.
 
 			ArgIndex += Classified.ArgCount;
 		}

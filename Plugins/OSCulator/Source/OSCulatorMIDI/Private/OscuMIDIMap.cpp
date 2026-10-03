@@ -25,35 +25,68 @@ namespace
 
 	const TCHAR* TypeLabel(EOscuMIDIInputType Type)
 	{
-		return Type == EOscuMIDIInputType::Note ? TEXT("note") : TEXT("CC");
+		switch (Type)
+		{
+		case EOscuMIDIInputType::Note:          return TEXT("note");
+		case EOscuMIDIInputType::ControlChange:  return TEXT("CC");
+		default:                                 return TEXT("program");
+		}
+	}
+
+	/** The parameters a message can actually write to, in declaration order. */
+	void GatherAssignable(const TArray<FOscuExposedParamInfo>& Params, TArray<const FOscuExposedParamInfo*>& Out)
+	{
+		Out.Reset();
+		for (const FOscuExposedParamInfo& Param : Params)
+		{
+			if (!Param.bOutputOnly)
+			{
+				Out.Add(&Param);
+			}
+		}
 	}
 
 	/**
-	 * A function that takes nothing is a trigger; one whose first parameter is a number
-	 * is continuous. That distinction is the whole of the note-versus-controller
-	 * decision, and it is already in the signature -- so nobody has to answer it twice.
+	 * A function that takes nothing is a trigger; one whose first assignable parameter
+	 * carries a magnitude is continuous. That distinction is the whole of the
+	 * note-versus-controller decision, and it is already in the signature -- so nobody
+	 * has to answer it twice.
 	 */
-	EOscuMIDIInputType InputTypeForSignature(const FString& FirstParamType)
+	EOscuMIDIInputType InputTypeForSignature(const TArray<FOscuExposedParamInfo>& Params)
 	{
-		if (FirstParamType.IsEmpty())
+		TArray<const FOscuExposedParamInfo*> Assignable;
+		GatherAssignable(Params, Assignable);
+
+		if (Assignable.Num() == 0)
 		{
+			// Takes nothing, so it is a trigger, and a pad is the right thing for it.
 			return EOscuMIDIInputType::Note;
 		}
-		if (FirstParamType == TEXT("float") || FirstParamType == TEXT("int"))
-		{
-			return EOscuMIDIInputType::ControlChange;
-		}
 
+		// Reads the classified fact rather than comparing the type label against "float"
+		// and "int", which quietly excluded byte and would drift the moment the type
+		// table grew an entry.
+		//
 		// A vector, a transform, a string: a continuous controller cannot fill one of
 		// those meaningfully, so it gets a note and whatever the remaining parameters
 		// are keep the zeroes the initialised frame gave them.
-		return EOscuMIDIInputType::Note;
+		return Assignable[0]->bContinuous
+			? EOscuMIDIInputType::ControlChange
+			: EOscuMIDIInputType::Note;
 	}
 }
 
 double FOscuMIDIBinding::ShapeValue(const int32 Raw) const
 {
 	const double Clamped = FMath::Clamp(static_cast<double>(Raw), 0.0, 127.0);
+
+	if (Type == EOscuMIDIInputType::ProgramChange)
+	{
+		// A program number is which patch, not how much. Remapping it would turn
+		// program 5 into 0.039, which is never what anyone meant -- so it is passed
+		// through whatever Remap says, and Remap is hidden for this row anyway.
+		return Clamped;
+	}
 
 	if (!bRemap)
 	{
@@ -66,9 +99,76 @@ double FOscuMIDIBinding::ShapeValue(const int32 Raw) const
 	return static_cast<double>(OutMin) + (Clamped / 127.0) * (static_cast<double>(OutMax) - static_cast<double>(OutMin));
 }
 
+double FOscuMIDIBinding::ShapePitch(const double Fraction, const int32 RawPitch) const
+{
+	if (!bRemapPitch)
+	{
+		// The note number itself, not its position. This is how pitch is asked for as
+		// an identity -- "which pad was it" -- rather than as a measurement.
+		return static_cast<double>(FMath::Clamp(RawPitch, 0, 127));
+	}
+
+	// Same deliberate avoidance of GetMappedRangeValueClamped as ShapeValue: PitchOutMin
+	// may exceed PitchOutMax on purpose, which is how a span is inverted so the lowest
+	// note gives the highest value.
+	const double Clamped = FMath::Clamp(Fraction, 0.0, 1.0);
+	return static_cast<double>(PitchOutMin) + Clamped * (static_cast<double>(PitchOutMax) - static_cast<double>(PitchOutMin));
+}
+
+bool UOscuMIDIMap::AssignDefaultValueParams(FOscuMIDIBinding& Binding, const TArray<FOscuExposedParamInfo>& Params)
+{
+	// Both empty or nothing happens. Half-filled means someone chose one deliberately,
+	// and completing their sentence for them is exactly the kind of help that moves a
+	// mapping you had already made.
+	if (!Binding.VelocityParam.IsNone() || !Binding.PitchParam.IsNone())
+	{
+		return false;
+	}
+
+	TArray<const FOscuExposedParamInfo*> Assignable;
+	GatherAssignable(Params, Assignable);
+
+	TArray<FName> Continuous;
+	for (const FOscuExposedParamInfo* Param : Assignable)
+	{
+		if (Param->bContinuous)
+		{
+			Continuous.Add(Param->Name);
+			if (Continuous.Num() == 2)
+			{
+				break;
+			}
+		}
+	}
+
+	if (Continuous.Num() == 0)
+	{
+		// A trigger, or a function whose parameters are all strings and structs. Left
+		// unnamed, which means it behaves exactly as it always did.
+		return false;
+	}
+
+	Binding.VelocityParam = Continuous[0];
+
+	// Pitch only for a note-driven row. A controller has no pitch, so naming one would
+	// put a constant in a parameter and hide the field that explains where it came from.
+	if (Continuous.Num() > 1 && Binding.Type == EOscuMIDIInputType::Note)
+	{
+		Binding.PitchParam = Continuous[1];
+	}
+
+	return true;
+}
+
 void UOscuMIDIMap::PostLoad()
 {
 	Super::PostLoad();
+
+	// Order matters and is the whole of the migration. Refresh mirrors Type DOWN from
+	// each binding onto its sources, so it has to run second: an asset authored when the
+	// source held the authored copy would otherwise have every controller row silently
+	// become a note row, reinterpreting CC 7 as note 7.
+	MigrateSourceTypesToBindings();
 	Refresh();
 }
 
@@ -125,9 +225,57 @@ void UOscuMIDIMap::UpdateLearnArming()
 
 void UOscuMIDIMap::Refresh()
 {
+	// First, so everything below sees one answer about what kind each row is.
+	MirrorBindingTypes();
+
 	ResolveNoteNames();
 	RebuildLookup();
 	RebuildSummaries();
+}
+
+void UOscuMIDIMap::MirrorBindingTypes()
+{
+	for (FOscuMIDIBinding& Binding : Bindings)
+	{
+		for (FOscuMIDISource& Source : Binding.Sources)
+		{
+			Source.Type = Binding.Type;
+		}
+	}
+}
+
+void UOscuMIDIMap::MigrateSourceTypesToBindings()
+{
+	for (FOscuMIDIBinding& Binding : Bindings)
+	{
+		if (Binding.Sources.Num() == 0)
+		{
+			// Nothing to recover from. An unassigned row keeps whatever Type it has,
+			// which for a fresh asset is the Note default.
+			continue;
+		}
+
+		// The first source is taken as the row's intent. A pre-migration asset COULD
+		// have held a mix -- that was legal then -- and there is no answer for what such
+		// a row should become, so the mix is reported rather than silently resolved.
+		const EOscuMIDIInputType Adopted = Binding.Sources[0].Type;
+
+		const bool bMixed = Binding.Sources.ContainsByPredicate(
+			[Adopted](const FOscuMIDISource& Source) { return Source.Type != Adopted; });
+
+		if (Binding.Type != Adopted)
+		{
+			Binding.Type = Adopted;
+		}
+
+		if (bMixed)
+		{
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("%s: %s/%s had sources of more than one kind, which is no longer possible -- the whole row is now '%s' from its first source. "
+					 "Split the others into a second binding if they were deliberate."),
+				*GetName(), *Binding.Tag.ToString(), *Binding.FunctionName.ToString(), TypeLabel(Adopted));
+		}
+	}
 }
 
 void UOscuMIDIMap::ResolveNoteNames()
@@ -159,6 +307,38 @@ void UOscuMIDIMap::ResolveNoteNames()
 					*GetName(), *Binding.Tag.ToString(), *Binding.FunctionName.ToString(),
 					*Source.Note, *Error, Source.ResolvedNote);
 			}
+
+			if (!Source.bNoteRange)
+			{
+				continue;
+			}
+
+			uint8 ResolvedHigh = 0;
+			if (OscuMIDINoteName::Parse(Source.NoteHigh, MiddleCOctave, ResolvedHigh, Error))
+			{
+				Source.ResolvedNoteHigh = ResolvedHigh;
+				Source.NoteHigh = OscuMIDINoteName::ToString(ResolvedHigh, MiddleCOctave);
+			}
+			else
+			{
+				UE_LOG(LogOSCulator, Warning, TEXT("%s: %s/%s has an unusable high note '%s' (%s). Keeping %d."),
+					*GetName(), *Binding.Tag.ToString(), *Binding.FunctionName.ToString(),
+					*Source.NoteHigh, *Error, Source.ResolvedNoteHigh);
+			}
+
+			if (Source.ResolvedNoteHigh < Source.ResolvedNote)
+			{
+				// Swapped rather than rejected. A span typed high-end-first is an
+				// ordering slip, not a change of mind, and the alternative is a row
+				// that matches no note at all while looking entirely filled in.
+				UE_LOG(LogOSCulator, Log,
+					TEXT("%s: %s/%s had its note range inverted (%d..%d); swapped."),
+					*GetName(), *Binding.Tag.ToString(), *Binding.FunctionName.ToString(),
+					Source.ResolvedNote, Source.ResolvedNoteHigh);
+
+				Swap(Source.ResolvedNote, Source.ResolvedNoteHigh);
+				Swap(Source.Note, Source.NoteHigh);
+			}
 		}
 	}
 }
@@ -185,8 +365,28 @@ void UOscuMIDIMap::RebuildLookup()
 			// Added, never rejected as a duplicate. Two bindings sharing one input is
 			// exactly how one pad drives two different actors, which the old
 			// channel-first structure could only treat as a mistake.
-			Lookup.Add(MakeLookupKey(Source.Channel, Source.Type, Source.GetNumber()),
-				FLookupEntry{ BindingIndex, SourceIndex });
+			//
+			// A range source registers once per note it covers, up to 128 entries. That
+			// keeps FindMatches, IsInputTaken and auto-map conflict detection exactly as
+			// they were -- one hash lookup per message, no second matching path to keep
+			// in step -- and 128 small entries is nothing next to a second code path
+			// that three callers would have to learn about.
+			const int32 Low = Source.GetNoteLow();
+			const int32 High = Source.GetNoteHigh();
+
+			if (Source.IsNoteRange())
+			{
+				for (int32 Number = Low; Number <= High; ++Number)
+				{
+					Lookup.Add(MakeLookupKey(Source.Channel, Source.Type, Number),
+						FLookupEntry{ BindingIndex, SourceIndex });
+				}
+			}
+			else
+			{
+				Lookup.Add(MakeLookupKey(Source.Channel, Source.Type, Source.GetNumber()),
+					FLookupEntry{ BindingIndex, SourceIndex });
+			}
 		}
 	}
 }
@@ -197,9 +397,26 @@ void UOscuMIDIMap::RebuildSummaries()
 	{
 		for (FOscuMIDISource& Source : Binding.Sources)
 		{
-			FString Text = Source.Type == EOscuMIDIInputType::Note
-				? FString::Printf(TEXT("Note  ch %d  %s (%d)"), Source.Channel, *Source.Note, Source.ResolvedNote)
-				: FString::Printf(TEXT("CC    ch %d  #%d"), Source.Channel, Source.ControlNumber);
+			FString Text;
+			if (Source.Type == EOscuMIDIInputType::ProgramChange)
+			{
+				Text = FString::Printf(TEXT("Prog  ch %d  #%d"), Source.Channel, Source.ProgramNumber);
+			}
+			else if (Source.Type == EOscuMIDIInputType::ControlChange)
+			{
+				Text = FString::Printf(TEXT("CC    ch %d  #%d"), Source.Channel, Source.ControlNumber);
+			}
+			else if (Source.bNoteRange)
+			{
+				Text = FString::Printf(TEXT("Notes ch %d  %s (%d) - %s (%d)  [%d notes]"),
+					Source.Channel, *Source.Note, Source.ResolvedNote,
+					*Source.NoteHigh, Source.ResolvedNoteHigh,
+					Source.GetNoteHigh() - Source.GetNoteLow() + 1);
+			}
+			else
+			{
+				Text = FString::Printf(TEXT("Note  ch %d  %s (%d)"), Source.Channel, *Source.Note, Source.ResolvedNote);
+			}
 
 			// Only when it narrows something. "(any device)" on every row would be
 			// noise in the common single-controller case.
@@ -232,6 +449,23 @@ void UOscuMIDIMap::RebuildSummaries()
 			{
 				Text += FString::Printf(TEXT(" (+%d more)"), Binding.Sources.Num() - 1);
 			}
+		}
+
+		// Where the values land, but only when it was said explicitly. A row that names
+		// nothing behaves as it always did, and saying so on every row would bury the
+		// handful that were deliberately routed.
+		TArray<FString> Routing;
+		if (!Binding.PitchParam.IsNone())
+		{
+			Routing.Add(FString::Printf(TEXT("pitch->%s"), *Binding.PitchParam.ToString()));
+		}
+		if (!Binding.VelocityParam.IsNone())
+		{
+			Routing.Add(FString::Printf(TEXT("vel->%s"), *Binding.VelocityParam.ToString()));
+		}
+		if (Routing.Num() > 0)
+		{
+			Text += FString::Printf(TEXT("   [%s]"), *FString::Join(Routing, TEXT(", ")));
 		}
 
 		switch (Binding.Status)
@@ -297,7 +531,8 @@ FOscuMIDIBinding* UOscuMIDIMap::FindBinding(const FName Tag, const FName Functio
 	});
 }
 
-int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& FunctionNames, const TMap<FName, FString>& FirstParamTypes, int32* OutAssigned)
+int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& FunctionNames,
+	const TMap<FName, TArray<FOscuExposedParamInfo>>& ParamsByFunction, int32* OutAssigned)
 {
 	if (Tag.IsNone() || FunctionNames.Num() == 0)
 	{
@@ -310,16 +545,41 @@ int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& Functio
 	TArray<FName> Sorted = FunctionNames;
 	Sorted.Sort([](const FName& A, const FName& B) { return A.Compare(B) < 0; });
 
+	static const TArray<FOscuExposedParamInfo> NoParams;
+
 	int32 Added = 0;
+	int32 Defaulted = 0;
+
 	for (const FName& FunctionName : Sorted)
 	{
-		if (FindBinding(Tag, FunctionName) == nullptr)
+		const TArray<FOscuExposedParamInfo>* Params = ParamsByFunction.Find(FunctionName);
+		const TArray<FOscuExposedParamInfo>& ParamList = Params != nullptr ? *Params : NoParams;
+
+		FOscuMIDIBinding* Existing = FindBinding(Tag, FunctionName);
+
+		if (Existing == nullptr)
 		{
 			FOscuMIDIBinding& Binding = Bindings.AddDefaulted_GetRef();
 			Binding.Tag = Tag;
 			Binding.FunctionName = FunctionName;
+			Defaulted += AssignDefaultValueParams(Binding, ParamList) ? 1 : 0;
 			++Added;
 		}
+		else
+		{
+			// Existing rows get the defaults too, but only where both are still empty.
+			// That is what lets an asset authored before any of this existed pick the
+			// assignment up by clicking Auto-Map again, without the additive-only rule
+			// being bent: filling an empty field moves nothing.
+			Defaulted += AssignDefaultValueParams(*Existing, ParamList) ? 1 : 0;
+		}
+	}
+
+	if (Defaulted > 0)
+	{
+		UE_LOG(LogOSCulator, Log,
+			TEXT("%s: pointed velocity and pitch at default parameters on %d binding(s) under '%s'."),
+			*GetName(), Defaulted, *Tag.ToString());
 	}
 
 	// Phase two, and only for a tag whose layout has been described. Without a rule the
@@ -330,7 +590,7 @@ int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& Functio
 
 	if (Rule == nullptr)
 	{
-		if (Added > 0)
+		if (Added > 0 || Defaulted > 0)
 		{
 			Refresh();
 		}
@@ -357,8 +617,24 @@ int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& Functio
 			continue;
 		}
 
-		const FString* FirstParam = FirstParamTypes.Find(FunctionName);
-		const EOscuMIDIInputType Type = InputTypeForSignature(FirstParam != nullptr ? *FirstParam : FString());
+		if (Binding->Type == EOscuMIDIInputType::ProgramChange)
+		{
+			// Left entirely alone. A program change is never something to GUESS from a
+			// signature -- it is a deliberate "patch 7 fires this" -- and the auto-map
+			// rule describes a first note and a first CC, with nothing to say about
+			// programs. Overwriting the type here would also undo the choice.
+			UE_LOG(LogOSCulator, Log,
+				TEXT("%s: '%s' is set to Program Change, so auto-map left it for you to number."),
+				*GetName(), *FunctionName.ToString());
+			continue;
+		}
+
+		const TArray<FOscuExposedParamInfo>* Params = ParamsByFunction.Find(FunctionName);
+		const EOscuMIDIInputType Type = InputTypeForSignature(Params != nullptr ? *Params : NoParams);
+
+		// Onto the binding, which is where the kind lives now. The source picks it up
+		// from the mirror, so it is never written in two places.
+		Binding->Type = Type;
 
 		int32& Next = (Type == EOscuMIDIInputType::Note) ? NextNote : NextControl;
 		while (Next <= 127 && IsInputTaken(Rule->Channel, Type, Next))
@@ -376,7 +652,7 @@ int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& Functio
 		FOscuMIDISource& Source = Binding->Sources.AddDefaulted_GetRef();
 		Source.Device = Rule->Device;
 		Source.Channel = Rule->Channel;
-		Source.Type = Type;
+		Source.Type = Type;  // the mirror will agree; set now so IsInputTaken is right below
 		if (Type == EOscuMIDIInputType::Note)
 		{
 			Source.ResolvedNote = static_cast<uint8>(Next);
@@ -384,6 +660,8 @@ int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& Functio
 		}
 		else
 		{
+			// Program Change never reaches here -- it is skipped above -- so this is the
+			// control-change case.
 			Source.ControlNumber = static_cast<uint8>(Next);
 		}
 
@@ -481,10 +759,74 @@ UOscuMIDIMap::FOscuMIDIValidation UOscuMIDIMap::Validate(UWorld* World)
 			++Result.Unassigned;
 		}
 
+		// The names this binding can actually assign to, with the slot each occupies.
+		// Written into the row so they are discoverable where they are typed; the panel
+		// has no way to offer them as a dropdown, because the engine's GetOptions hook
+		// resolves to the owning asset and cannot tell which array element is in front
+		// of the user.
+		{
+			TArray<FOscuExposedParamInfo> Params;
+			TArray<int32> Slots;
+
+			if (!Router->DescribeParams(Binding.Tag, Binding.FunctionName, Params, Slots))
+			{
+				Binding.AvailableParams = TEXT("-- nothing in this level exposes this function --");
+			}
+			else if (Params.Num() == 0)
+			{
+				Binding.AvailableParams = TEXT("-- takes no arguments; it is a trigger --");
+			}
+			else
+			{
+				// Would Auto-Map have something to say here? Counted, never written.
+				if (Binding.VelocityParam.IsNone() && Binding.PitchParam.IsNone())
+				{
+					const bool bHasContinuous = Params.ContainsByPredicate(
+						[](const FOscuExposedParamInfo& Param)
+						{
+							return Param.bContinuous && !Param.bOutputOnly;
+						});
+
+					if (bHasContinuous)
+					{
+						++Result.CouldDefaultValueParams;
+					}
+				}
+
+				TArray<FString> Lines;
+				for (int32 Index = 0; Index < Params.Num(); ++Index)
+				{
+					const FOscuExposedParamInfo& Param = Params[Index];
+
+					// Output pins are listed rather than hidden, with the reason: they
+					// are real parameters and their absence from the assignable set is
+					// otherwise indistinguishable from a typo in the name.
+					Lines.Add(Param.bOutputOnly
+						? FString::Printf(TEXT("%s : %s  -- output, cannot be assigned"),
+							*Param.Name.ToString(), *Param.TypeLabel)
+						: FString::Printf(TEXT("%s : %s  @ slot %d"),
+							*Param.Name.ToString(), *Param.TypeLabel, Slots[Index]));
+				}
+				Binding.AvailableParams = FString::Join(Lines, LINE_TERMINATOR);
+			}
+		}
+
 		for (const FOscuMIDISource& Source : Binding.Sources)
 		{
-			ByInput.FindOrAdd(MakeLookupKey(Source.Channel, Source.Type, Source.GetNumber()))
-				.Add(FString::Printf(TEXT("%s/%s"), *Binding.Tag.ToString(), *Binding.FunctionName.ToString()));
+			// A range source claims every input it covers, so a clash with another
+			// binding anywhere in the span is reported rather than only at the bottom
+			// note.
+			for (int32 Number = Source.GetNoteLow(); Number <= Source.GetNoteHigh(); ++Number)
+			{
+				ByInput.FindOrAdd(MakeLookupKey(Source.Channel, Source.Type,
+						Source.Type == EOscuMIDIInputType::Note ? Number : Source.GetNumber()))
+					.Add(FString::Printf(TEXT("%s/%s"), *Binding.Tag.ToString(), *Binding.FunctionName.ToString()));
+
+				if (Source.Type != EOscuMIDIInputType::Note)
+				{
+					break;
+				}
+			}
 		}
 	}
 
@@ -588,29 +930,21 @@ int32 UOscuMIDIMap::AutoMapFromWorld(UWorld* World)
 	for (const FOscuExposedTagInfo& TagInfo : Tags)
 	{
 		TArray<FName> FunctionNames;
-		TMap<FName, FString> FirstParamTypes;
+		TMap<FName, TArray<FOscuExposedParamInfo>> ParamsByFunction;
 		FunctionNames.Reserve(TagInfo.Functions.Num());
 
 		for (const FOscuExposedFunctionInfo& Function : TagInfo.Functions)
 		{
 			FunctionNames.Add(Function.FunctionName);
 
-			// Only the first parameter, because that is what decides trigger versus
-			// continuous. An output-only pin consumes nothing, so it is skipped when
-			// looking for what the function actually wants.
-			FString FirstParam;
-			for (const FOscuExposedParamInfo& Param : Function.Params)
-			{
-				if (!Param.bOutputOnly)
-				{
-					FirstParam = Param.TypeLabel;
-					break;
-				}
-			}
-			FirstParamTypes.Add(Function.FunctionName, FirstParam);
+			// The whole parameter list, not just the first one's type label. It decides
+			// trigger versus continuous as it always did, and now also which parameters
+			// velocity and pitch are pointed at -- which needs the names, and needs to
+			// see past the first entry.
+			ParamsByFunction.Add(Function.FunctionName, Function.Params);
 		}
 
-		TotalAdded += MergeFunctions(TagInfo.Tag, FunctionNames, FirstParamTypes, &TotalAssigned);
+		TotalAdded += MergeFunctions(TagInfo.Tag, FunctionNames, ParamsByFunction, &TotalAssigned);
 	}
 
 	UE_LOG(LogOSCulator, Log,
@@ -657,7 +991,17 @@ void UOscuMIDIMap::ValidateAgainstLevel()
 		return;
 	}
 
-	Validate(World);
+	const FOscuMIDIValidation Result = Validate(World);
+
+	if (Result.CouldDefaultValueParams > 0)
+	{
+		// Said, not done. Validate never edits, so this points at the button that may.
+		UE_LOG(LogOSCulator, Log,
+			TEXT("%s: %d binding(s) have a numeric parameter but name none for velocity or pitch. "
+				 "Click Auto-Map From Level to point them at the first two, or set them by hand -- "
+				 "Available Parameters on each row lists the names."),
+			*GetName(), Result.CouldDefaultValueParams);
+	}
 
 	// Nothing was edited, so the package is deliberately not dirtied. Nudge the panel
 	// so the new titles appear without a reselect.

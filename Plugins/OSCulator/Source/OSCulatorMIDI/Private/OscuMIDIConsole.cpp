@@ -88,6 +88,14 @@ namespace
 			return;
 		}
 
+		if (Settings.bPerformanceMode)
+		{
+			// Said first, and only when it is on. Learn not arming is otherwise a
+			// mystery, and this is the one line that explains it.
+			Ar.Log(TEXT("[OSCulator] PERFORMANCE MODE is on: Learn is disabled, recompile tracking is off,"));
+			Ar.Log(TEXT("  and parameter slots are resolved once instead of per message."));
+		}
+
 		Ar.Log(*FString::Printf(TEXT("[OSCulator] MIDI devices open: %d"), MIDI->GetOpenDeviceCount()));
 		if (MIDI->GetOpenDeviceCount() == 0)
 		{
@@ -99,7 +107,7 @@ namespace
 		// is the one number here that asks for action: notes were thrown away.
 		for (const FOscuMIDIPort& Port : MIDI->GetPorts())
 		{
-			Ar.Log(*FString::Printf(TEXT("  '%s': queue %d, ignoring %s, %s"),
+			Ar.Log(*FString::Printf(TEXT("  '%s': queue %d, dropping %s, listening on %s"),
 				*Port.Name, UOscuSettings::Get()->MIDIInputQueueSize,
 				*OscuMIDI::DescribeFilterMask(Port.GetFilterMask()),
 				*OscuMIDI::DescribeChannelMask(Port.GetChannelMask())));
@@ -218,6 +226,13 @@ namespace
 					const UOscuMIDIMap::FOscuMIDIValidation Result = Map->Validate(World);
 					Ar.Log(*FString::Printf(TEXT("[OSCulator] %s: %d ok, %d broken, %d for another level, %d unassigned. See the log for detail."),
 						*Map->GetName(), Result.Found, Result.FunctionMissing, Result.TagMissing, Result.Unassigned));
+
+				if (Result.CouldDefaultValueParams > 0)
+				{
+					Ar.Log(*FString::Printf(
+						TEXT("    %d binding(s) could have velocity/pitch pointed at a parameter. Auto-Map From Level fills them in."),
+						Result.CouldDefaultValueParams));
+				}
 				}
 			}
 		}
@@ -288,7 +303,10 @@ namespace
 			}
 
 			const uint8 Channel = static_cast<uint8>(Pair.Key >> 16);
-			const bool bIsNote = static_cast<EOscuMIDIInputType>((Pair.Key >> 8) & 0xFF) == EOscuMIDIInputType::Note;
+			const EOscuMIDIInputType Kind = static_cast<EOscuMIDIInputType>((Pair.Key >> 8) & 0xFF);
+			const TCHAR* KindLabel =
+				Kind == EOscuMIDIInputType::Note ? TEXT("note")
+				: (Kind == EOscuMIDIInputType::ProgramChange ? TEXT("program") : TEXT("CC"));
 
 			if (Reported == 0)
 			{
@@ -296,7 +314,7 @@ namespace
 			}
 			++Reported;
 
-			Ar.Log(*FString::Printf(TEXT("  ch %d %s %d:"), Channel, bIsNote ? TEXT("note") : TEXT("CC"), Pair.Key & 0xFF));
+			Ar.Log(*FString::Printf(TEXT("  ch %d %s %d:"), Channel, KindLabel, Pair.Key & 0xFF));
 			for (const FClaim& Claim : Pair.Value)
 			{
 				Ar.Log(*FString::Printf(TEXT("      %s   [%s%s]"), *Claim.Target, *Claim.Asset,

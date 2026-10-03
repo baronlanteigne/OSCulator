@@ -36,17 +36,6 @@ struct OSCULATORCORE_API FOscuOSCTarget
 };
 
 /**
- * Project settings for OSCulator, under Project Settings > Plugins > OSCulator.
- *
- * Four transport branches, each behind its own checkbox. Every property in a
- * branch carries the EditCondition/EditConditionHides pair, so an unchecked branch
- * does not grey out -- it VANISHES from the panel. Someone who only does OSC input
- * should see one checkbox and a handful of fields, not twenty.
- *
- * The same booleans gate whether anything is opened at runtime, so a disabled
- * branch costs nothing at all: no socket, no thread, no tick hook.
- */
-/**
  * Which kinds of MIDI message an input device listens for.
  *
  * Ticked means "I want this". Anything left unticked is discarded at the port, before
@@ -61,9 +50,9 @@ struct OSCULATORCORE_API FOscuOSCTarget
  * them today. Everything that carries a playable value starts ticked, so a device
  * works as expected out of the box and narrowing it is a deliberate act.
  *
- * To cut continuous controller traffic specifically, reach for MIDIInputChannels
- * first: dropping a channel you do not map costs you nothing, while unticking Control
- * Change costs you every controller on every channel.
+ * To cut continuous controller traffic specifically, reach for a device's Ignored
+ * Channels first: dropping a channel you do not map costs you nothing, while unticking
+ * Control Change costs you every controller on every channel.
  */
 USTRUCT()
 struct FOscuMIDIInputMessages
@@ -117,6 +106,87 @@ struct FOscuMIDIInputMessages
 	bool bSysEx = false;
 };
 
+/**
+ * One MIDI controller to listen to, and what to throw away from it.
+ *
+ * Both filters live here rather than once for the whole project, because both are
+ * statements about a specific piece of hardware. A channel number means something
+ * different on every box -- channel 10 is drums on one and a lighting desk on the next
+ * -- and so does a message type: the sequencer flooding the wire with clock is one
+ * device, while the knob box next to it sends nothing but control change and must keep
+ * it. A project-wide setting could only ever be the intersection of what every device
+ * happens to agree on, which means one noisy device drags the filter tighter for
+ * everything else, or nothing gets filtered at all.
+ *
+ * PortMidi applies both per stream, so this costs nothing to do properly: the mask and
+ * the filter were always per port, and only the settings pretended otherwise.
+ */
+USTRUCT()
+struct OSCULATORCORE_API FOscuMIDIInputDevice
+{
+	GENERATED_BODY()
+
+	/**
+	 * The device name as the OS reports it. Run OSCulator.MIDIDevices to list them.
+	 *
+	 * By name, never by enumeration order: device exclusivity conflicts between plugins
+	 * are real, and grabbing whatever happens to be first is how you end up fighting
+	 * another plugin for a port.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input Device")
+	FString Name;
+
+	/**
+	 * Which kinds of message to accept from this device. See FOscuMIDIInputMessages.
+	 *
+	 * Per device because the traffic is: untick Clock on the sequencer that floods the
+	 * wire with it without taking Program Change away from the box that needs it. The
+	 * defaults suit a controller -- everything playable ticked, clock and transport and
+	 * sysex not -- so a device added and left alone behaves.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input Device",
+		meta = (DisplayName = "Listen For"))
+	FOscuMIDIInputMessages ListenFor;
+
+	/**
+	 * Channels to DISCARD from this device, 1-16. Empty -- the default -- keeps all of
+	 * them.
+	 *
+	 * An exclusion list, not a selection: every device starts hearing everything it
+	 * sends, and each entry here is a deliberate "I will never map this, stop paying for
+	 * it". Discarded at the port by PortMidi's channel mask, so a muted channel never
+	 * takes a queue slot and never reaches the game thread. That is the cheapest filter
+	 * OSCulator has, and unlike Listen For it costs nothing you might want -- a channel
+	 * you do not map is a channel you do not use.
+	 *
+	 * Exclusion is also the only direction that fails safely. A freshly added array row
+	 * starts at 0, which is outside 1-16: here it means "ignore nothing yet" and the
+	 * device keeps working, where a selection list read the same row as "listen to
+	 * channel 0" and silently muted the hardware.
+	 *
+	 * Entries outside 1-16 are skipped with a log line. Listing all sixteen is taken at
+	 * face value -- the device is opened and hears no channel messages at all -- but it
+	 * is called out in the log, because at that point unticking the device is clearer.
+	 *
+	 * Learn lifts this entirely while a row is armed, so an input can still be taught
+	 * from a channel that is normally muted. It would be a long afternoon otherwise.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input Device",
+		meta = (DisplayName = "Ignored Channels"))
+	TArray<int32> IgnoredChannels;
+};
+
+/**
+ * Project settings for OSCulator, under Project Settings > Plugins > OSCulator.
+ *
+ * Four transport branches, each behind its own checkbox. Every property in a
+ * branch carries the EditCondition/EditConditionHides pair, so an unchecked branch
+ * does not grey out -- it VANISHES from the panel. Someone who only does OSC input
+ * should see one checkbox and a handful of fields, not twenty.
+ *
+ * The same booleans gate whether anything is opened at runtime, so a disabled
+ * branch costs nothing at all: no socket, no thread, no tick hook.
+ */
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "OSCulator"))
 class OSCULATORCORE_API UOscuSettings : public UDeveloperSettings
 {
@@ -126,6 +196,25 @@ public:
 	virtual FName GetCategoryName() const override { return FName("Plugins"); }
 
 	static const UOscuSettings* Get();
+
+	/**
+	 * True when a resolved signature fact may be remembered instead of re-derived.
+	 *
+	 * The only reason to re-derive per message is that a Blueprint could be recompiled
+	 * underneath us. A packaged build cannot recompile anything, and Performance Mode
+	 * says you are not going to -- so both answers are the same question, asked once
+	 * here rather than reasoned about separately at each call site.
+	 */
+	static bool ShouldCacheSignatureFacts()
+	{
+#if WITH_EDITOR
+		return Get()->bPerformanceMode;
+#else
+		// Nothing can recompile in a cooked build, so re-resolving per message was only
+		// ever waste there.
+		return true;
+#endif
+	}
 
 	/**
 	 * Broadcast after any of these settings is edited.
@@ -257,6 +346,41 @@ public:
 		meta = (EditCondition = "bEnableOSCOut", EditConditionHides))
 	FString DescribeAddress = TEXT("/_describe");
 
+	// ---- Performance ----
+
+	/**
+	 * Switches off everything that exists only to help you AUTHOR the project.
+	 *
+	 * For running a show. The authoring features are already absent from a packaged
+	 * build -- they live behind WITH_EDITOR -- but a show run FROM the editor, which is
+	 * the normal way to do this, has every one of them live. This is the switch that
+	 * says "I have finished editing; stop paying for the editing."
+	 *
+	 * What it turns off, exactly:
+	 *
+	 *   - MIDI Learn. It will not arm, and the per-message check that looks for an armed
+	 *     row is skipped. Arming is refused with a log line rather than silently doing
+	 *     nothing, because a Learn button that quietly stopped working would be a
+	 *     miserable thing to debug.
+	 *   - The Blueprint-recompile hooks that keep the registry's view of each class
+	 *     fresh. Nothing recompiles during a show, and a cache rebuild triggered
+	 *     mid-performance is a hitch nobody asked for.
+	 *   - Per-message parameter-slot resolution. A binding that names a parameter
+	 *     normally re-resolves the name against the live signature on EVERY message, so
+	 *     that a recompile which reorders parameters is followed. With recompiles ruled
+	 *     out, the answer is resolved once and remembered.
+	 *
+	 * What it does NOT touch: anything that affects what your show does. No filter, no
+	 * channel, no mapping, no value shaping. Turning it on must never change a single
+	 * value that reaches a function -- only how much work was done to get it there.
+	 *
+	 * Validate and Auto-Map are unaffected: they only run when their button is pressed,
+	 * so they cost nothing during a show whatever this says.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Performance",
+		meta = (DisplayName = "Performance Mode (disable authoring features)"))
+	bool bPerformanceMode = false;
+
 	// ---- MIDI Input ----
 
 	/** Off by default; the transport lands with Phase 6. */
@@ -264,21 +388,21 @@ public:
 	bool bEnableMIDIIn = false;
 
 	/**
-	 * Every controller to listen to. Chosen by name, never by enumeration order:
-	 * device exclusivity conflicts between plugins are real, and grabbing whatever
-	 * happens to be first is how you end up fighting another plugin for a port.
+	 * Every controller to listen to, each with its own list of channels to ignore.
 	 *
 	 * A list because MIDI devices are opened individually -- unlike OSC input,
 	 * where one socket already hears every sender. Events from all listed devices
 	 * are merged into one stream, so two controllers sending the same channel and
-	 * note both trigger the same mapping.
+	 * note both trigger the same mapping; a binding that must distinguish them names
+	 * its Device.
 	 *
 	 * A device that is missing or already open is skipped with a log line rather
 	 * than taking the others down with it.
 	 */
 	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
-		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides))
-	TArray<FString> MIDIInputDeviceNames;
+		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides,
+				TitleProperty = "Name"))
+	TArray<FOscuMIDIInputDevice> MIDIInputDevices;
 
 	/**
 	 * Which mapping assets are active. All of them, at once.
@@ -310,34 +434,6 @@ public:
 	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
 		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides, ClampMin = "0", ClampMax = "5"))
 	int32 MiddleCOctave = 3;
-
-	/**
-	 * Which kinds of message to listen for. Anything unticked is discarded at the
-	 * port. See FOscuMIDIInputMessages.
-	 */
-	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
-		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides, DisplayName = "Listen For"))
-	FOscuMIDIInputMessages MIDIInputMessages;
-
-	/**
-	 * Which MIDI channels to listen on, 1-16. Empty means all of them.
-	 *
-	 * The sharpest tool here, and the one to reach for first. A MIDI interface carries
-	 * a whole rig, while a map usually answers to two or three channels; everything on
-	 * the others is discarded at the port instead of taking a queue slot. Unlike the
-	 * type filter it costs nothing you might want -- a channel you do not map is a
-	 * channel you do not use.
-	 *
-	 * Learn ignores this while a row is armed, so a note can still be learned from a
-	 * channel that is normally muted. It would be a long afternoon otherwise.
-	 *
-	 * Entries outside 1-16 are ignored with a log line, and a list containing nothing
-	 * valid falls back to every channel: a new row starts at 0, and silently muting the
-	 * device the moment one is added would look exactly like broken hardware.
-	 */
-	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input",
-		meta = (EditCondition = "bEnableMIDIIn", EditConditionHides))
-	TArray<int32> MIDIInputChannels;
 
 	/**
 	 * How many messages each input device can queue between frames.
