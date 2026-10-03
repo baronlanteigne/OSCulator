@@ -34,9 +34,10 @@ bi-directional interaction between multiple tools.
 ## Quick start
 
 **Get Started Tutorial: https://youtu.be/gXMZ8Na-vls**
+**MIDI In Mapping Tutorial: https://youtu.be/_J8eaGlQ7CE**
 
 This repository *is* a working demo project — clone it, open `OSCulator.uproject`,
-build when prompted, and press Play.
+build when prompted and you're ready to test osc and midi map with your own tools.
 
 1. Send OSC to **port 8000**, or open the patch in `TouchDesigner/` and use that.
 2. In the console, `OSCulator.List Custom` shows everything the demo map exposes.
