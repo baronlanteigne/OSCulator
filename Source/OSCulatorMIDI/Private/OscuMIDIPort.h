@@ -84,6 +84,7 @@ struct FOscuMIDIPort
 		, Stream(Other.Stream)
 		, FilterMask(Other.FilterMask)
 		, ChannelMask(Other.ChannelMask)
+		, ConfiguredChannelMask(Other.ConfiguredChannelMask)
 	{
 		Other.Stream = nullptr;
 		Other.DeviceID = INDEX_NONE;
@@ -103,6 +104,7 @@ struct FOscuMIDIPort
 			Stream = Other.Stream;
 			FilterMask = Other.FilterMask;
 			ChannelMask = Other.ChannelMask;
+			ConfiguredChannelMask = Other.ConfiguredChannelMask;
 
 			Other.Stream = nullptr;
 			Other.DeviceID = INDEX_NONE;
@@ -122,9 +124,11 @@ struct FOscuMIDIPort
 	/**
 	 * Opens by name. False on failure, with a reason in OutError fit for a log line.
 	 *
-	 * QueueSize is in messages. FilterMask and ChannelMask come from BuildFilterMask
-	 * and BuildChannelMask; passing them in rather than reading settings here keeps
-	 * this testable and keeps the policy in one place.
+	 * QueueSize is in messages. FilterMask and ChannelMask come from BuildFilterMask and
+	 * BuildChannelMaskIgnoring; passing them in rather than reading settings here keeps
+	 * this testable and keeps the policy in one place. Both are per device, so two ports
+	 * opened in the same restart routinely get different ones -- which is free, since
+	 * PortMidi applies both per stream anyway.
 	 */
 	bool Open(const FString& DeviceName, int32 QueueSize, int32 FilterMask, int32 ChannelMask, FString& OutError);
 
@@ -135,6 +139,15 @@ struct FOscuMIDIPort
 
 	/** Replaces the channel mask on an open port. Used to lift it while Learn is armed. */
 	void SetChannelMask(int32 ChannelMask);
+
+	/**
+	 * Puts back the mask this port was opened with, after Learn lifted it.
+	 *
+	 * The port remembers it rather than the caller recomputing it, because each device
+	 * has its own ignored-channel list now -- restoring from settings would mean
+	 * re-matching every open port against its configured entry by name.
+	 */
+	void RestoreChannelMask();
 
 	/**
 	 * Reads everything queued and reports what it understood.
@@ -159,7 +172,12 @@ private:
 	void* Stream = nullptr;
 
 	int32 FilterMask = 0;
+
+	/** What is live on the stream right now. Lifted to 0xFFFF while Learn is armed. */
 	int32 ChannelMask = 0;
+
+	/** What Open was given, so RestoreChannelMask has something to go back to. */
+	int32 ConfiguredChannelMask = 0xFFFF;
 };
 
 /** One device as our own copy of PortMidi sees it. */
@@ -193,7 +211,7 @@ namespace OscuMIDI
 	void EnumerateDevices(TArray<FOscuMIDIDeviceInfo>& OutDevices);
 
 	/**
-	 * The PortMidi filter mask for a "listen for" setting.
+	 * The PortMidi filter mask for one device's "listen for" setting.
 	 *
 	 * Note the inversion: the settings say what to keep, PortMidi wants what to throw
 	 * away. Pure, so a test can check it without hardware.
@@ -201,16 +219,19 @@ namespace OscuMIDI
 	int32 BuildFilterMask(const FOscuMIDIInputMessages& Listen);
 
 	/**
-	 * The PortMidi channel mask for a list of channels numbered 1-16.
+	 * The PortMidi channel mask for one device's list of channels to IGNORE, numbered
+	 * 1-16.
 	 *
-	 * An empty list means every channel, which is also what an all-invalid list means:
-	 * silently listening to nothing would be a very quiet way to fail.
+	 * Exclusion, not selection: the mask starts at all sixteen and each listed channel
+	 * clears a bit, so an empty list -- the default -- admits everything with no special
+	 * case, and a row still sitting at its freshly-added 0 changes nothing. DeviceName is
+	 * only for the log lines this emits on an out-of-range entry or an all-sixteen list.
 	 */
-	int32 BuildChannelMask(const TArray<int32>& Channels);
+	int32 BuildChannelMaskIgnoring(const TArray<int32>& IgnoredChannels, const FString& DeviceName);
 
 	/** What a filter mask throws away, in words, for a log line. */
 	FString DescribeFilterMask(int32 Mask);
 
-	/** What a channel mask admits, in words, for a log line. */
+	/** What a channel mask drops, in words, for a log line. */
 	FString DescribeChannelMask(int32 Mask);
 }

@@ -125,9 +125,10 @@ Which ports are open and what they are filtering, every active map with every bi
 and the counters.
 
 ```
-[OSCulator] MIDI devices open: 1
-  filter: ignoring clock, timecode, transport, sysex
-  'Elektron TM-1': queue 1024, ignoring clock, timecode, transport, sysex, all channels
+[OSCulator] MIDI devices open: 2
+  'Elektron TM-1': queue 1024, dropping clock, timecode, transport, sysex, listening on all channels except 10
+     unused messages 0, queue overflows 0
+  'Midi Fighter Twister': queue 1024, dropping NOTES, clock, timecode, transport, sysex, listening on all channels
      unused messages 0, queue overflows 0
   Map: DA_Pads [Elektron TM-1] (4 binding(s), 3 assigned, 1 unassigned)
     laser/Aim   <- Note  ch 1  C1 (36)
@@ -145,8 +146,9 @@ Reading it:
 | received > 0, unmapped > 0 | Delivering, but on an input no binding claims |
 | dispatched 0 with bindings present | The tag has no actors, or the function is not exposed |
 | `-- unassigned` | The binding exists but nothing fires it yet. Normal after Auto-Map |
-| queue overflows > 0 | Messages were lost. Raise the queue size, or narrow Listen For or the channel list |
-| unused messages climbing | Something is getting through Listen For that no binding uses |
+| queue overflows > 0 | Messages were lost. Raise the queue size, or narrow **that device's** Listen For or Ignored Channels |
+| unused messages climbing | Something is getting through that device's Listen For that no binding uses |
+| `PERFORMANCE MODE is on` | Learn will not arm and recompiles are not tracked. Untick Performance Mode in Project Settings to go back to editing |
 
 ### `OSCulator.MIDIValidate` — editor too
 
@@ -187,6 +189,7 @@ name.
 ```
 MIDI in [Elektron TM-1]: channel=1 note=37 (C#1) velocity=100 on
 MIDI in [Midi Fighter Twister]: channel=1 CC=7 value=64
+MIDI in [rtpMIDI]: channel=1 program=5
 ```
 
 This is the tool for *"is the note I think I am sending the note that arrives?"* — which

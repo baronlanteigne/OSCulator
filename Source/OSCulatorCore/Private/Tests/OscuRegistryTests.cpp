@@ -287,4 +287,134 @@ bool FOscuRegistryFilterTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+//////////////////////////////////////////////////////////////////////////
+// Forgetting a class's signature.
+//
+// The editor loop is edit, compile, try again, so a reflection cache that only ever
+// filled was guaranteed to go stale -- and did. A deleted function kept being offered to
+// auto-map and a newly added one kept being missed, both because nothing ever asked the
+// cache to forget. Intermittently, too: a Blueprint recompile often reuses the same
+// UClass object with new contents, so a cache keyed on the class pointer cannot notice
+// on its own.
+//
+// A Blueprint cannot be recompiled from an automation test, so what is checked here is
+// the mechanism the recompile hook drives: that invalidation actually discards the entry,
+// that it reaches derived classes, and that a re-scan includes it. The editor delegate
+// wiring itself is not covered.
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuRegistryStaleExposureTest,
+	"OSCulator.Registry.StaleExposure",
+	OscuTest::Flags)
+
+bool FOscuRegistryStaleExposureTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	FScopedTestWorld Scope;
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("OSC_laser") });
+	Scope.BeginPlay();
+
+	UOscuRouterSubsystem* Router = Scope.Router();
+	if (!TestNotNull(TEXT("the registry exists"), Router))
+	{
+		return false;
+	}
+
+	UClass* const ActorClass = AOscuTestActor::StaticClass();
+
+	// Reflection walks, not object addresses. The obvious test -- compare the address of
+	// the returned exposure before and after -- is unreliable: freeing a cached entry and
+	// immediately building its replacement can land on the same address, which reads as a
+	// cache hit that never happened. Counting the walks measures the real question.
+	auto Builds = [Router] { return Router->GetClassExposureBuildCount(); };
+
+	// ---- A warm entry is answered without looking again ----
+	{
+		Router->GetClassExposure(ActorClass);
+		const uint64 Before = Builds();
+
+		Router->GetClassExposure(ActorClass);
+		Router->GetClassExposure(ActorClass);
+
+		TestEqual(TEXT("a cached class is not walked again"), Builds(), Before);
+	}
+
+	// ---- Invalidating the class forces the next ask to look again ----
+	{
+		const uint64 Before = Builds();
+		Router->InvalidateClassExposure(ActorClass);
+
+		// Nothing is rebuilt eagerly; the cost is paid on next use.
+		TestEqual(TEXT("invalidation itself walks nothing"), Builds(), Before);
+
+		const FOscuClassExposure& Rebuilt = Router->GetClassExposure(ActorClass);
+		TestEqual(TEXT("the next ask walks it once"), Builds(), Before + 1);
+
+		// And it is correct, not merely rebuilt.
+		TestTrue(TEXT("the rebuilt exposure still finds a known function"),
+			Rebuilt.ByAddressName.Contains(FName(TEXT("Stop"))));
+	}
+
+	// ---- Invalidating a PARENT reaches the child ----
+	{
+		Router->GetClassExposure(ActorClass);
+		const uint64 Before = Builds();
+
+		// A child Blueprint's callable surface is built from everything it inherits, so a
+		// parent that gained or lost a function changes what the child offers without the
+		// child being recompiled at all. AActor is a real ancestor of the test actor.
+		Router->InvalidateClassExposure(AActor::StaticClass());
+
+		Router->GetClassExposure(ActorClass);
+		TestEqual(TEXT("invalidating an ancestor discards the descendant"), Builds(), Before + 1);
+	}
+
+	// ---- An unrelated class is left alone ----
+	{
+		Router->GetClassExposure(ActorClass);
+		const uint64 Before = Builds();
+
+		// Not an ancestor of the actor, so the actor's entry must survive. Invalidation
+		// that quietly cleared everything would hide its own bugs.
+		Router->InvalidateClassExposure(UOscuRouterSubsystem::StaticClass());
+
+		Router->GetClassExposure(ActorClass);
+		TestEqual(TEXT("invalidating an unrelated class keeps the entry"), Builds(), Before);
+	}
+
+	// ---- THE REGRESSION: a re-scan forgets signatures, not just actors ----
+	{
+		Router->GetClassExposure(ActorClass);
+		const uint64 Before = Builds();
+
+		// ScanWorld is what both editor buttons -- Auto-Map From Level and Validate
+		// Against Level -- come through. It used to reset the actor list and the trigger
+		// cache while leaving the signature cache untouched, which meant there was
+		// nothing a user could run to pick up a function they had just added or deleted:
+		// a deleted one kept being offered, a new one kept being missed. "Re-scan" has to
+		// mean all of it.
+		Router->ScanWorld();
+
+		Router->GetClassExposure(ActorClass);
+		TestEqual(TEXT("ScanWorld discards cached signatures too"), Builds(), Before + 1);
+	}
+
+	// ---- Introspect still works across a re-scan, which is auto-map's actual path ----
+	{
+		Router->ScanWorld();
+
+		const TArray<FOscuExposedTagInfo> Tags = Router->Introspect(EOscuIntrospectFilter::All, FName(TEXT("laser")));
+		if (TestEqual(TEXT("the tag is still found after a re-scan"), Tags.Num(), 1))
+		{
+			TestTrue(TEXT("and still reports its functions"), Tags[0].Functions.Num() > 0);
+
+			const bool bFoundStop = Tags[0].Functions.ContainsByPredicate(
+				[](const FOscuExposedFunctionInfo& Info) { return Info.FunctionName == FName(TEXT("Stop")); });
+			TestTrue(TEXT("including a known one"), bFoundStop);
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

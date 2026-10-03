@@ -41,6 +41,16 @@ struct OSCULATORCORE_API FOscuExposedParamInfo
 	/** A Blueprint output pin: filled by the call, not by the message. */
 	UPROPERTY()
 	bool bOutputOnly = false;
+
+	/**
+	 * One number carrying a magnitude: float, int or byte. See FOscuParamClass.
+	 *
+	 * What makes a parameter worth pointing a knob or a note range at, and so what
+	 * auto-map picks from when it decides which parameters MIDI velocity and pitch
+	 * should default to.
+	 */
+	UPROPERTY()
+	bool bContinuous = false;
 };
 
 USTRUCT()

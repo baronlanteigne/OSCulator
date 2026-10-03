@@ -12,6 +12,11 @@
 #include "GameFramework/Actor.h"
 #include "UObject/UnrealType.h"
 
+#if WITH_EDITOR
+// Only forward-declared by UObjectGlobals.h, and the recompile hook takes one by reference.
+#include "UObject/ObjectCompileContext.h"
+#endif
+
 namespace
 {
 	/**
@@ -156,6 +161,7 @@ namespace
 
 			ParamInfo.ArgCount = Classified.ArgCount;
 			ParamInfo.TypeLabel = Classified.TypeLabel;
+			ParamInfo.bContinuous = Classified.bContinuous;
 			Out.Params.Add(MoveTemp(ParamInfo));
 		}
 
@@ -302,8 +308,38 @@ bool UOscuRouterSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 	return World->IsGameWorld() || World->WorldType == EWorldType::Editor;
 }
 
+void UOscuRouterSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+
+#if WITH_EDITOR
+	// Belt and braces alongside ScanWorld. A button press is not the only moment the
+	// answer changes -- a Blueprint can be recompiled while a map asset sits open, or
+	// mid-PIE -- and a cache that is only correct just after a button press is a cache
+	// nobody can trust.
+	CDOCompiledHandle = FCoreUObjectDelegates::OnObjectPostCDOCompiled.AddUObject(
+		this, &UOscuRouterSubsystem::HandleClassRecompiled);
+
+	ObjectsReinstancedHandle = FCoreUObjectDelegates::OnObjectsReinstanced.AddUObject(
+		this, &UOscuRouterSubsystem::HandleObjectsReinstanced);
+#endif
+}
+
 void UOscuRouterSubsystem::Deinitialize()
 {
+#if WITH_EDITOR
+	if (CDOCompiledHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectPostCDOCompiled.Remove(CDOCompiledHandle);
+		CDOCompiledHandle.Reset();
+	}
+	if (ObjectsReinstancedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectsReinstanced.Remove(ObjectsReinstancedHandle);
+		ObjectsReinstancedHandle.Reset();
+	}
+#endif
+
 	if (ActorSpawnedHandle.IsValid())
 	{
 		if (UWorld* World = GetWorld())
@@ -357,6 +393,14 @@ void UOscuRouterSubsystem::ScanWorld()
 {
 	TagToActors.Reset();
 	TriggerAddressCache.Reset();
+
+	// And the signatures. This is a RE-scan: the honest meaning of it is "forget what
+	// you think this level exposes and look again", and for a long time it did not
+	// include the one cache that answers what a class exposes. Both editor buttons --
+	// Auto-Map From Level and Validate Against Level -- come through here, so without
+	// this there was nothing a user could run to pick up a function they had just added
+	// or deleted. Rebuilding costs one reflection walk per class, on next use.
+	ClassExposureCache.Reset();
 
 	UWorld* World = GetWorld();
 	if (World == nullptr)
@@ -445,6 +489,8 @@ const FOscuClassExposure& UOscuRouterSubsystem::GetClassExposure(UClass* Class) 
 
 TSharedRef<FOscuClassExposure> UOscuRouterSubsystem::BuildClassExposure(UClass* Class) const
 {
+	++ClassExposureBuilds;
+
 	TSharedRef<FOscuClassExposure> Exposure = MakeShared<FOscuClassExposure>();
 	if (Class == nullptr)
 	{
@@ -718,6 +764,270 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 
 	return TotalCalls;
 }
+
+namespace
+{
+	/**
+	 * Running sum of ArgCount up to each parameter, matching FillFrame exactly.
+	 *
+	 * The correspondence has to be exact or a named parameter silently drives its
+	 * neighbour. Output-only parameters carry ArgCount 0 and so fall out of the sum on
+	 * their own. A variadic parameter swallows the rest of the message, so nothing can
+	 * follow it -- registration already rejects that -- and the walk stops there.
+	 */
+	void AccumulateSlots(const TArray<FOscuExposedParamInfo>& Params, TArray<int32>& OutSlots)
+	{
+		OutSlots.Reset(Params.Num());
+
+		int32 Slot = 0;
+		for (const FOscuExposedParamInfo& Param : Params)
+		{
+			OutSlots.Add(Slot);
+
+			if (Param.ArgCount == OscuVariadicArgCount)
+			{
+				break;
+			}
+			Slot += Param.ArgCount;
+		}
+
+		// A variadic break leaves the tail unfilled; nothing may follow one, so this
+		// only matters for keeping the two arrays the same length.
+		while (OutSlots.Num() < Params.Num())
+		{
+			OutSlots.Add(INDEX_NONE);
+		}
+	}
+
+}
+
+const FOscuFunctionBinding* UOscuRouterSubsystem::FindExposedFunction(const FName Tag, const FName FunctionName) const
+{
+	const TArray<TWeakObjectPtr<AActor>>* Found = TagToActors.Find(Tag);
+	if (Found == nullptr)
+	{
+		return nullptr;
+	}
+
+	// Walks the registry's own array in place. Deliberately NOT GatherActors, which
+	// copies every living actor into a caller array and purges dead entries as it goes:
+	// this runs at MIDI message rate for a binding that names a parameter, and it stops
+	// at the first class that has the function, so a copy of the whole tag was an
+	// allocation per message to answer a question that usually ends on the first entry.
+	//
+	// Dead entries are skipped rather than removed, which is what keeps this const --
+	// GatherActors still does the purging on the dispatch path.
+	for (const TWeakObjectPtr<AActor>& Weak : *Found)
+	{
+		const AActor* Actor = Weak.Get();
+		if (!IsValid(Actor))
+		{
+			continue;
+		}
+
+		// First class that has it wins. Actors sharing a tag are assumed to be the same
+		// type but nothing enforces it, and a parameter name is a fact about a
+		// signature -- if two classes disagree, dispatch already calls both and the
+		// author has a bigger problem than slot numbering.
+		if (const FOscuFunctionBinding* Binding =
+				GetClassExposure(Actor->GetClass()).ByAddressName.Find(FunctionName))
+		{
+			return Binding;
+		}
+	}
+
+	return nullptr;
+}
+
+int32 UOscuRouterSubsystem::FindParamSlot(
+	const FName Tag, const FName FunctionName, const FName ParamName, int32* OutArgCount) const
+{
+	if (ParamName.IsNone())
+	{
+		return INDEX_NONE;
+	}
+
+	const FOscuFunctionBinding* Binding = FindExposedFunction(Tag, FunctionName);
+	if (Binding == nullptr)
+	{
+		return INDEX_NONE;
+	}
+
+	// The running sum is kept inline and abandoned the moment the name matches, rather
+	// than building a slot for every parameter and then looking one up. This is called
+	// per MIDI message for a binding that names a parameter, so an allocation here is an
+	// allocation at message rate -- it used to make two, one of which was this.
+	int32 Slot = 0;
+	for (const FOscuExposedParamInfo& Param : Binding->Info.Params)
+	{
+		if (Param.Name == ParamName)
+		{
+			if (Param.bOutputOnly)
+			{
+				// Addressable by name, but filled by the call rather than the message.
+				// Reported as absent, because writing to it is not a thing that can
+				// happen.
+				return INDEX_NONE;
+			}
+
+			if (OutArgCount != nullptr)
+			{
+				*OutArgCount = Param.ArgCount;
+			}
+			return Slot;
+		}
+
+		if (Param.ArgCount == OscuVariadicArgCount)
+		{
+			// A trailing array swallows the rest of the message, so nothing after it has
+			// a slot of its own -- registration already rejects such a signature.
+			break;
+		}
+		Slot += Param.ArgCount;
+	}
+
+	return INDEX_NONE;
+}
+
+bool UOscuRouterSubsystem::DescribeParams(
+	const FName Tag, const FName FunctionName,
+	TArray<FOscuExposedParamInfo>& OutParams, TArray<int32>& OutSlots) const
+{
+	OutParams.Reset();
+	OutSlots.Reset();
+
+	const FOscuFunctionBinding* Binding = FindExposedFunction(Tag, FunctionName);
+	if (Binding == nullptr)
+	{
+		return false;
+	}
+
+	OutParams = Binding->Info.Params;
+	AccumulateSlots(OutParams, OutSlots);
+	return true;
+}
+
+void UOscuRouterSubsystem::InvalidateClassExposure(const UClass* Class)
+{
+	if (Class == nullptr)
+	{
+		return;
+	}
+
+	// Descendants as well as the class itself. A child Blueprint's exposure is built
+	// from everything it inherits, so a parent that gained or lost a function changes
+	// what the child offers without the child being recompiled at all.
+	TArray<TWeakObjectPtr<UClass>> Doomed;
+	for (const TPair<TWeakObjectPtr<UClass>, TSharedRef<FOscuClassExposure>>& Pair : ClassExposureCache)
+	{
+		const UClass* Cached = Pair.Key.Get();
+
+		// A key whose class has been collected is dropped on the way past: it can never
+		// be hit again, and leaving it would grow the map for the life of the process.
+		if (Cached == nullptr || Cached->IsChildOf(Class))
+		{
+			Doomed.Add(Pair.Key);
+		}
+	}
+
+	for (const TWeakObjectPtr<UClass>& Key : Doomed)
+	{
+		ClassExposureCache.Remove(Key);
+	}
+
+	// Whether an address is a trigger is derived from a signature, so it goes too.
+	TriggerAddressCache.Reset();
+}
+
+#if WITH_EDITOR
+
+void UOscuRouterSubsystem::HandleClassRecompiled(UObject* CDO, const FObjectPostCDOCompiledContext& Context)
+{
+	if (CDO == nullptr)
+	{
+		return;
+	}
+
+	if (UOscuSettings::Get()->bPerformanceMode)
+	{
+		// Nothing recompiles during a show, and a cache rebuild triggered mid-show is a
+		// hitch nobody asked for. Checked here rather than by skipping registration, so
+		// the switch takes effect the moment it is flipped.
+		return;
+	}
+
+	// The CDO's class IS the recompiled class. Note that a Blueprint recompile often
+	// reuses the same UClass object with new contents -- which is exactly why a cache
+	// keyed on the class pointer could not notice on its own, and why the staleness
+	// survived until something explicitly forgot.
+	InvalidateClassExposure(CDO->GetClass());
+}
+
+void UOscuRouterSubsystem::HandleObjectsReinstanced(const TMap<UObject*, UObject*>& ReplacementMap)
+{
+	if (ReplacementMap.Num() == 0)
+	{
+		return;
+	}
+
+	if (UOscuSettings::Get()->bPerformanceMode)
+	{
+		return;
+	}
+
+	for (const TPair<UObject*, UObject*>& Pair : ReplacementMap)
+	{
+		if (const UClass* OldClass = Cast<UClass>(Pair.Key))
+		{
+			InvalidateClassExposure(OldClass);
+		}
+	}
+
+	// Follow the actors. Reinstancing destroys every instance and builds a replacement,
+	// without going through the spawn path -- so the registry's weak pointers go null
+	// and OnActorSpawned never hears about the new ones. Re-pointing here keeps a tag
+	// populated across a recompile instead of emptying until the next rescan.
+	int32 Followed = 0;
+	for (TPair<FName, TArray<TWeakObjectPtr<AActor>>>& TagPair : TagToActors)
+	{
+		TArray<TWeakObjectPtr<AActor>>& Actors = TagPair.Value;
+
+		for (int32 Index = 0; Index < Actors.Num(); )
+		{
+			AActor* Existing = Actors[Index].Get();
+
+			// Still alive and not replaced: leave it be.
+			if (IsValid(Existing) && !ReplacementMap.Contains(Existing))
+			{
+				++Index;
+				continue;
+			}
+
+			UObject* const* Replacement = Existing != nullptr ? ReplacementMap.Find(Existing) : nullptr;
+			AActor* AsActor = Replacement != nullptr ? Cast<AActor>(*Replacement) : nullptr;
+
+			if (IsValid(AsActor))
+			{
+				Actors[Index] = AsActor;
+				++Followed;
+				++Index;
+			}
+			else
+			{
+				// Replaced by nothing, or by something that is not an actor. Either way
+				// it can no longer be called.
+				Actors.RemoveAt(Index);
+			}
+		}
+	}
+
+	if (Followed > 0)
+	{
+		UE_LOG(LogOSCulator, Verbose, TEXT("Registry followed %d reinstanced actor(s) after a recompile."), Followed);
+	}
+}
+
+#endif // WITH_EDITOR
 
 TArray<FOscuExposedTagInfo> UOscuRouterSubsystem::Introspect(EOscuIntrospectFilter Filter, FName TagFilter) const
 {

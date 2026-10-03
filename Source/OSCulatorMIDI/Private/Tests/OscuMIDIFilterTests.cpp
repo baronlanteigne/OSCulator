@@ -198,10 +198,13 @@ bool FOscuMIDIFilterMaskTest::RunTest(const FString& Parameters)
 }
 
 /**
- * The channel mask.
+ * The per-device channel mask.
  *
- * PortMidi counts channels from zero and OSCulator counts from one, which is exactly
- * the kind of difference that produces a rig answering to the wrong channel.
+ * Two things to get wrong here. PortMidi counts channels from zero and OSCulator counts
+ * from one, which is exactly the kind of difference that produces a rig answering to the
+ * wrong channel. And the list is an EXCLUSION list -- what to throw away -- while the
+ * mask it produces is an admission mask, so the inversion is checked explicitly rather
+ * than assumed.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FOscuMIDIChannelMaskTest,
@@ -210,35 +213,52 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FOscuMIDIChannelMaskTest::RunTest(const FString& Parameters)
 {
-	// Channel 1 is PortMidi's bit 0. Off by one here and every mapping listens to the
-	// wrong instrument.
-	TestEqual(TEXT("channel 1 is bit 0"), OscuMIDI::BuildChannelMask({ 1 }), 0x0001);
-	TestEqual(TEXT("channel 2 is bit 1"), OscuMIDI::BuildChannelMask({ 2 }), 0x0002);
-	TestEqual(TEXT("channel 16 is bit 15"), OscuMIDI::BuildChannelMask({ 16 }), 0x8000);
+	const FString Device(TEXT("TestDevice"));
 
-	TestEqual(TEXT("several channels combine"), OscuMIDI::BuildChannelMask({ 1, 2, 16 }), 0x8003);
-	TestEqual(TEXT("order does not matter"), OscuMIDI::BuildChannelMask({ 16, 2, 1 }), 0x8003);
-	TestEqual(TEXT("a repeat is harmless"), OscuMIDI::BuildChannelMask({ 7, 7 }), OscuMIDI::BuildChannelMask({ 7 }));
+	// Nothing ignored is every channel. This is the default for a device with no
+	// configuration at all, so getting it wrong mutes every rig out of the box.
+	TestEqual(TEXT("ignoring nothing admits all 16"),
+		OscuMIDI::BuildChannelMaskIgnoring({}, Device), 0xFFFF);
 
-	// An empty list means everything. This is the default, so getting it wrong would
-	// mute every device out of the box.
-	TestEqual(TEXT("an empty list admits all 16"), OscuMIDI::BuildChannelMask({}), 0xFFFF);
-	TestEqual(TEXT("all 16 listed is the same as none listed"),
-		OscuMIDI::BuildChannelMask({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }), 0xFFFF);
+	// Channel 1 is PortMidi's bit 0. Off by one here and the wrong instrument goes quiet.
+	TestEqual(TEXT("ignoring channel 1 clears bit 0"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 1 }, Device), 0xFFFE);
+	TestEqual(TEXT("ignoring channel 2 clears bit 1"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 2 }, Device), 0xFFFD);
+	TestEqual(TEXT("ignoring channel 16 clears bit 15"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 16 }, Device), 0x7FFF);
 
-	// Out-of-range entries are ignored, and a list of nothing else falls back to all
-	// channels rather than silently listening to none. A new array row starts at 0, so
-	// this is the common case rather than the exotic one.
-	AddExpectedError(TEXT("ignoring"), EAutomationExpectedErrorFlags::Contains, 0);
-	TestEqual(TEXT("out of range entries are ignored"), OscuMIDI::BuildChannelMask({ 0, 1, 17, -3 }), 0x0001);
-	TestEqual(TEXT("a list of only bad entries admits all 16"), OscuMIDI::BuildChannelMask({ 0, 17, 99 }), 0xFFFF);
+	TestEqual(TEXT("several ignored channels combine"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 1, 2, 16 }, Device), 0x7FFC);
+	TestEqual(TEXT("order does not matter"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 16, 2, 1 }, Device), 0x7FFC);
+	TestEqual(TEXT("a repeat is harmless"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 7, 7 }, Device),
+		OscuMIDI::BuildChannelMaskIgnoring({ 7 }, Device));
+
+	// The reason the list is an exclusion list: a freshly added array row sits at 0, and
+	// in this direction that ignores nothing instead of muting the device. Out-of-range
+	// entries are reported, because a row that looks set and does nothing is confusing
+	// on its own terms.
+	AddExpectedError(TEXT("outside 1-16"), EAutomationExpectedErrorFlags::Contains, 0);
+	TestEqual(TEXT("a new row at 0 changes nothing"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 0 }, Device), 0xFFFF);
+	TestEqual(TEXT("out of range entries are skipped, valid ones still apply"),
+		OscuMIDI::BuildChannelMaskIgnoring({ 0, 1, 17, -3 }, Device), 0xFFFE);
+
+	// All sixteen is taken at face value rather than second-guessed into meaning
+	// "everything", which is what the old selection list had to do.
+	AddExpectedError(TEXT("all sixteen channels"), EAutomationExpectedErrorFlags::Contains, 0);
+	TestEqual(TEXT("ignoring all 16 admits nothing"),
+		OscuMIDI::BuildChannelMaskIgnoring(
+			{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, Device), 0x0000);
 
 	TestEqual(TEXT("all channels describes itself"),
-		OscuMIDI::DescribeChannelMask(OscuMIDI::BuildChannelMask({})),
+		OscuMIDI::DescribeChannelMask(OscuMIDI::BuildChannelMaskIgnoring({}, Device)),
 		FString(TEXT("all channels")));
-	TestEqual(TEXT("a narrowed mask names its channels"),
-		OscuMIDI::DescribeChannelMask(OscuMIDI::BuildChannelMask({ 2, 7 })),
-		FString(TEXT("channel(s) 2, 7 only")));
+	TestEqual(TEXT("a narrowed mask names what it drops"),
+		OscuMIDI::DescribeChannelMask(OscuMIDI::BuildChannelMaskIgnoring({ 2, 7 }, Device)),
+		FString(TEXT("all channels except 2, 7")));
 
 	return true;
 }

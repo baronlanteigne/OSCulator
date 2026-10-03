@@ -216,6 +216,59 @@ source port is ephemeral, not the port it listens on, so there is no way to gues
 
 ---
 
+## 4b. Performance Mode
+
+**Project Settings → Plugins → OSCulator → Performance**
+
+| Setting | Notes |
+| --- | --- |
+| Performance Mode | Off by default. Switches off everything that exists only to help you *author* the project |
+
+The authoring features already vanish from a **packaged** build — they live behind
+`WITH_EDITOR`. But running a show **from the editor**, which is the normal way to do it,
+has every one of them live. This is the switch that says *I have finished editing; stop
+paying for the editing.*
+
+What it turns off:
+
+- **MIDI Learn.** It will not arm, and the per-message check that looks for an armed row
+  is skipped. Arming is **refused with a log line** and the tickbox is cleared, rather
+  than silently doing nothing — a Learn button that quietly stopped working would be a
+  miserable thing to debug.
+- **Blueprint-recompile tracking.** Nothing recompiles during a show, and a cache rebuild
+  triggered mid-performance is a hitch nobody asked for.
+- **Per-message parameter-slot resolution.** A binding that names a parameter normally
+  re-resolves that name against the live signature on *every message*, so a recompile
+  which reorders parameters is followed. With recompiles ruled out, the answer is
+  resolved once and remembered.
+
+What it does **not** touch: anything that affects what your show does. No filter, no
+channel, no mapping, no value shaping. **Turning it on must never change a value that
+reaches a function** — only how much work was done to get it there. There is a test
+asserting exactly that, running the same gestures in both modes and comparing value for
+value.
+
+`OSCulator.MIDIStatus` says so at the top when it is on, so "why won't Learn arm" has a
+visible answer.
+
+**Validate and Auto-Map are unaffected** either way: they only run when their button is
+pressed, so they cost nothing during a show regardless.
+
+### What was costing anything in the first place
+
+Worth being concrete, because most of it was already free:
+
+| | Editor, idle | Editor, Learn armed | Packaged |
+| --- | --- | --- | --- |
+| Learn | one weak-pointer check per message | lifts every port's channel mask to all 16, so more traffic reaches the once-per-frame queue | absent |
+| Recompile tracking | nothing until a compile happens | — | absent |
+| Named parameter slots | resolved per message | — | **also resolved per message** until now |
+
+That last row was the real one, and it was not editor-only. Resolving a slot walked the
+tag's actor list and allocated twice per call, up to twice per matched binding per
+message. Performance Mode removes the repetition; the allocations were removed outright,
+in both modes, because they were never worth anything.
+
 ## 5. MIDI input
 
 **Project Settings → Plugins → OSCulator → MIDI Input**
@@ -223,10 +276,10 @@ source port is ephemeral, not the port it listens on, so there is no way to gues
 | Setting | Notes |
 | --- | --- |
 | Enable MIDI In | Off by default |
-| MIDI Input Device Names | Exact names. Run `OSCulator.MIDIDevices` to list them |
+| MIDI Input Devices | One entry per controller: its exact name, and what to drop from it. Run `OSCulator.MIDIDevices` to list names |
+| └ Listen For | Which message types that device gets to send. Ticked means *send me this*. See below |
+| └ Ignored Channels | Channels to **discard** from that device, 1–16. Empty — the default — keeps all sixteen |
 | Middle C Octave | `3` gives C3 = 60 (Ableton, Logic). `4` gives C4 = 60 (scientific) |
-| Listen For | Which message types reach the queue at all. See below |
-| MIDI Input Channels | Listen only on these, 1–16. Empty means all sixteen |
 | MIDI Input Queue Size | Messages buffered between frames. Default 1024 |
 | MIDI Maps | The mapping assets. All of them are live at once |
 
@@ -243,12 +296,13 @@ MIDI **output** still uses the engine plugin, which has none of these problems. 
 PortMidi instances share no state — verified by making the engine terminate and restart
 its copy while an OSCulator stream was open and reading, which it did not notice.
 
-### Listen For, channels, and the queue
+### Listen For, Ignored Channels, and the queue
 
-These three settings exist because of one fact: **the input queue is drained once per
-game-thread frame**. Any hitch — pressing Play, a shader compile — is a window in which
-nothing drains and the queue fills. When it fills, PortMidi discards everything in it
-and reports an overflow, so a flood of messages nobody wants takes your notes with it.
+Both filters are **per device**, alongside the one queue size they share. They exist
+because of one fact: **the input queue is drained once per game-thread frame**. Any
+hitch — pressing Play, a shader compile — is a window in which nothing drains and the
+queue fills. When it fills, PortMidi discards everything in it and reports an overflow,
+so a flood of messages nobody wants takes your notes with it.
 
 Measured on a sequencer running at tempo: **MIDI clock was 68% of all traffic** (340 of
 503 messages in six seconds), with control change another ~70/second once modulation was
@@ -256,22 +310,44 @@ running. Clock alone will overflow a small queue within seconds of pressing Play
 
 So:
 
-- **Listen For** drops whole message types at the port, before they are ever queued.
-  Ticked means *send me this*. Clock, transport and sysex start unticked because nothing
-  in OSCulator can act on them; everything carrying a playable value starts ticked.
-- **MIDI Input Channels** is the sharper tool. A MIDI interface carries a whole rig
-  while a map answers to two or three channels — everything on the others is discarded
-  at the port. Unlike unticking Control Change, this costs you nothing you wanted.
-  Entries outside 1–16 are ignored with a log line, and a list containing nothing valid
-  falls back to every channel rather than silently muting the device.
+- **Listen For**, per device, drops whole message types at the port, before they are
+  ever queued. Ticked means *send me this*. Clock, transport and sysex start unticked
+  because nothing in OSCulator can act on them; everything carrying a playable value
+  starts ticked, so a controller you add and leave alone behaves.
+
+  Per device because the noise is. Untick Clock on the sequencer flooding the wire with
+  it without taking Program Change away from the box next to it that needs it — where a
+  single project-wide setting forced the choice between dragging the filter tighter for
+  everything or filtering nothing at all. PortMidi applies the filter per stream
+  anyway; only the settings ever pretended otherwise.
+
+  Unticking **Notes** is called out per device in the log, since with the filter per
+  device the interesting case is one box out of three going deaf.
+- **Ignored Channels**, per device, is the sharper tool. A MIDI interface carries a
+  whole rig while a map answers to two or three channels — list the rest and they are
+  discarded at the port. Unlike unticking Control Change, this costs you nothing you
+  wanted: a channel you do not map is a channel you do not use.
+
+  It is **per device** because a channel number means something different on each box —
+  channel 10 is drums on one and a lighting desk on the next — so one project-wide list
+  could only ever be the intersection of what every device happened to agree on.
+
+  It is an **exclusion** list, not a selection, for two reasons. Every device works
+  fully the moment you add it, and narrowing is the deliberate act. And a freshly added
+  array row sits at `0`: read as "ignore nothing yet" that is harmless, where read as
+  "listen to channel 0" it silently muted the hardware and looked exactly like a broken
+  cable. Entries outside 1–16 get a log line and no effect; listing all sixteen is taken
+  at face value — the device opens and hears nothing — but is called out in the log,
+  since unticking the device is clearer at that point.
 - **Queue Size** is the headroom. At ~100 messages/second, 1024 absorbs about ten
   seconds of stalled game thread.
 
 If an overflow does happen you get a log line naming the device, the queue size, and
 what to change. `OSCulator.MIDI` shows a per-port overflow count.
 
-MIDI Learn temporarily ignores the channel list while a source is armed, so you can
-still learn an input from a channel you normally mute.
+MIDI Learn lifts every device's Ignored Channels while a source is armed, so you can
+still learn an input from a channel you normally mute. Each port goes back to its own
+list when Learn is cancelled.
 
 ### Devices, and sharing them with other applications
 
@@ -310,25 +386,108 @@ Auto Map Rules[]             per-tag layout, used by Auto-Map. See below
 Bindings[]
 ├─ Tag                       "laser", from an actor tagged OSC_laser
 ├─ Function Name             called on every actor carrying the tag
+├─ Type                      Note, Control Change or Program Change, for the WHOLE row
 ├─ Sources[]                 everything that fires it. None is legal and inert
 │  ├─ Device                 empty inherits Default Device; empty there means any
 │  ├─ Channel                1-16
-│  ├─ Type                   Note or Control Change
-│  ├─ Note / CC Number       "C3", "C#2", a bare "61", or a CC number
-│  └─ Learn                  tick to arm, then play or turn something
+│  ├─ Note Range             notes only: match a span of pitches, not one note
+│  ├─ Note / CC / Program #  "C3", "C#2", a bare "61", a CC number, or a program number
+│  │                         with Note Range on, Note is the BOTTOM of the span
+│  ├─ Note High              the top of the span, inclusive
+│  └─ Learn                  tick to arm, then play, turn or send something
+├─ Send Source Number        prepend the note, CC or program number, raw, as a first arg
+├─ Value -> Parameter        which parameter the value drives, by name. Empty = the first
+├─ Available Parameters      read-only: what this function offers, filled by Validate
+│
+│                            ---- hidden on a Program Change row ----
 ├─ Remap                     on by default: 0-127 becomes Out Min..Out Max
 ├─ Out Min / Out Max         default 0..1. Out Min > Out Max inverts
-├─ Send Source Number        prepend the note or CC number, raw, as a first argument
+│
+│                            ---- notes only ----
+├─ Pitch -> Parameter        which parameter pitch drives, by name. Empty = not sent
+├─ Remap Pitch               on by default: span position becomes Pitch Out Min..Max
+├─ Pitch Out Min / Max       default 0..1. Untick Remap Pitch for the raw note number
 └─ On Note Off               also fire on release, with a raw value of 0
 ```
+
+**"The value"** means whichever one the row's `Type` carries: velocity for a note, the
+controller value for a control change, the **program number** for a program change.
 
 **Several maps are live at once**, so how you split them is your choice: one asset per
 device, one per show, or one for everything. A per-device asset sets `Default Device`
 once at the top and leaves every source's Device empty.
 
-A binding driven from two controllers is better as **one binding with two sources** than
-as two bindings in two assets — the target and its value settings stay in one place
-instead of being kept in sync by hand.
+A binding driven from two controllers of the **same kind** is better as **one binding
+with two sources** than as two bindings in two assets — the target and its value settings
+stay in one place instead of being kept in sync by hand.
+
+### Program Change
+
+A program change carries **one** data byte where a note and a controller carry two.
+There is no velocity, no controller value, nothing continuous at all — so a row driven by
+one is a **trigger that happens to know which program arrived**.
+
+```
+Type            Program Change
+Sources[0]
+├─ Channel      1
+└─ Program #    5
+```
+
+That row fires when program 5 arrives on channel 1. Nothing else does: a different
+program, a different channel, or a *note* 5 all miss it, because the lookup is keyed on
+the kind as well as the number.
+
+- **The program number is the value.** It reaches the function the same way velocity or a
+  controller value would, so `Value -> Parameter` points it wherever you like.
+- **It is never remapped.** A program number is which patch, not how much — squashing
+  patch 5 into `0.039` is never what anyone meant. `Remap` and its range are hidden
+  outright on a Program Change row, and ignored even if an older asset had them set.
+  This is the same reasoning `Send Source Number` has always carried.
+- **Numbered 0–127, as it arrives on the wire.** Hardware disagrees with itself here —
+  plenty of synths print patch *1* for program *0* — so OSCulator shows the number that
+  arrived rather than guessing at your box's labelling.
+- **Program 0 is a real program.** A row keyed on it fires, so the lowest patch on every
+  box is mappable.
+
+**One program can trigger as many functions as you like** — add a binding per function,
+all keyed on the same program. They all fire, across as many actors as carry the tags.
+That is the same shared-input behaviour notes and controllers have.
+
+Make sure **Program Change** is ticked under that device's *Listen For*, or the message
+never reaches the queue.
+
+Two things it does not do. **Auto-Map never chooses Program Change** — it is a deliberate
+"patch 7 fires this", not something to guess from a signature, and the auto-map rule
+describes a first note and a first CC with nothing to say about programs. A row you set
+to Program Change is left for you to number, and auto-map says so in the log rather than
+overwriting your choice. And there is **no program change on the output side** yet; `Send
+MIDI` covers notes and control change only.
+
+### Note, Control Change or Program Change is per row
+
+`Type` sits on the binding, not on each source, so **every source on a row is the same
+kind**. The three behave differently in ways that reach the value settings: a note carries
+a pitch and a release, a controller carries neither, and a program change carries no
+continuous value at all. With the kind settled on the row, every setting on it is
+meaningful for every source — and the ones that are not simply **vanish from the panel**:
+pitch and On Note Off on anything but a note, Remap and its range on a program change.
+
+That hiding is the reason the kind lives here. Unreal's `EditCondition` can only read
+properties of its **own struct**, so a setting on the binding cannot see a `Type` that
+lives inside `Sources[]`. Moving the one property made four of them hideable.
+
+The cost: **one function driven by both a pad and a knob is two bindings**, not one
+binding with two sources. Both still fire, and the capability is not gone — it is spelled
+differently, and the two rows no longer share a remap range automatically.
+
+Changing `Type` re-points every source on the row, and their numbers are **reinterpreted**
+— note 36 becomes CC 36. Learn sets it from whatever you play, and warns if that re-points
+other sources on the row.
+
+Assets authored before this are migrated on load: each row adopts its first source's kind,
+so a controller row stays a controller row. A row that held a genuine mix — legal before,
+not now — resolves to its first source and says so in the log.
 
 **Sharing an input is legal.** Two bindings claiming the same channel and note both
 fire, which is how one pad drives two different actors. `OSCulator.MIDIValidate` lists
@@ -337,16 +496,126 @@ overlap is visible.
 
 ### What the function receives
 
-One value, remapped, in the first parameter. Everything after it keeps the zeroes the
-initialised frame gave it — which is why a function you intend to drive from MIDI should
-take its MIDI-relevant parameter first.
+By default, **one value, remapped, in the first parameter**. Everything after it keeps
+the zeroes the initialised frame gave it.
 
 A float landing in an `int32` parameter is **truncated toward zero**, so "remap to 0–10
 and call a function taking an int" works with no extra setting. With **Send Source
 Number** on, the note or CC number arrives first, unremapped, and the value second.
 
 Arguments are always accepted leniently: a zero-argument trigger simply ignores the
-value it is handed.
+value it is handed, and a signature wanting more than MIDI supplies gets zeroes for the
+rest.
+
+### Note ranges, and two values at once
+
+A note source normally matches **one** pitch. Tick **Note Range** and it matches a span
+instead — `Note` becomes the bottom, `Note High` the top — and every pitch in between
+fires the same binding. The span is contiguous; there is no way to punch holes in it. A
+row that should fire on some notes of its range and not others is two rows.
+
+A range also makes the pitch *mean* something, so it becomes a second value alongside
+velocity:
+
+- **Pitch** is where the note sat in the span, `0..1`, remapped into **Pitch Out
+  Min/Max**. It normalises across the span's **own extent**, so one octave and two
+  octaves both cover the full output range. Untick **Remap Pitch** to get the raw note
+  number instead — that is how you ask for pitch as an identity rather than a position.
+- **Velocity** is unchanged: 0–127 through **Remap** into **Out Min/Max**.
+
+The two have separate ranges because they are separate measurements — a pitch sweeping
+`0..1` while velocity drives a `0..10` intensity.
+
+A single note still works exactly as before. One pitch carries no information, so its
+span position is `0` and **Pitch -> Parameter** is normally left empty.
+
+### Which parameter gets which value
+
+Two values need somewhere to go, so a binding can name the parameter each one drives:
+
+```
+Velocity -> Parameter    Level
+Pitch    -> Parameter    Pitch
+```
+
+Names, not positions. Declaration order used to decide this, which meant a function you
+wanted to drive from MIDI had to put its MIDI-relevant parameter **first**; naming the
+parameter means the function is written for what it does and the map adapts. Given
+
+```
+void Sweep(FVector Origin, float Pitch, float Level)
+```
+
+neither scalar is reachable by position — `Origin` eats the first three argument slots —
+but both are reachable by name.
+
+Some details worth knowing:
+
+- **Auto-Map fills them in for you.** A newly listed binding gets velocity pointed at
+  its function's **first** continuous parameter and pitch at the **second**. Velocity
+  takes the first because that keeps the common case identical to the old positional
+  default. See below.
+- **Leave both empty and nothing changes.** The binding behaves exactly as it did before
+  any of this existed: one value, first parameter. **Send Source Number** keeps working
+  too. Naming either parameter takes over the whole layout, and Send Source Number is
+  then ignored.
+- **A name is resolved to an argument slot, not a parameter index.** A `vec3` occupies
+  three slots and a Blueprint **output** pin occupies none, so an output pin cannot be
+  assigned — it is written by the call.
+- **Resolution happens against the live signature, every message.** A Blueprint recompile
+  that reorders or renames parameters is followed rather than silently mismatched.
+- **A name that matches nothing is reported once**, naming what the function actually
+  offers, and that value is not sent. The event still fires — the note did arrive on an
+  input the binding claims — and the parameter keeps its zero rather than being quietly
+  redirected to whatever happened to be first.
+- **On release**, pitch survives but velocity does not: which pad was let go is still the
+  pad it was, while a released note carries no meaningful velocity and shapes from zero.
+
+**Available Parameters** on each binding lists the names that function offers, with the
+slot each occupies, and is filled by **Validate Against Level**. It is read-only and not
+saved — it is a fact about the level that happens to be open. There is no dropdown: the
+engine's property-options hook resolves to the owning asset and cannot tell which array
+element is being edited, so it could only offer every parameter name in the whole map,
+which would read as a list of valid choices without being one.
+
+**Control change is untouched by all of this.** A controller already sends a value, and
+a CC number means nothing on a scale, so a span of CC numbers would be a different
+feature with no use behind it. On a Control Change row every pitch field is hidden
+outright, and Auto-Map leaves `Pitch -> Parameter` empty.
+
+### What counts as a parameter worth driving
+
+**Auto-Map From Level** pre-fills the pair from the function's signature: velocity gets
+the first parameter that carries a *magnitude*, pitch gets the second.
+
+Only `float`, `int` and `byte` qualify. The exclusions are the interesting part:
+
+| Excluded | Why |
+| --- | --- |
+| `bool` | A number in C++ and a choice in meaning. Sweeping a controller across one is a threshold nobody picked |
+| `enum` | Same, worse: a sweep picks nonsense on the way past |
+| `string`, `name`, `text` | Take a value, but not a magnitude |
+| `vec3`, `rotator`, `color`, `transform` | Several numbers. Which of a vec3's three slots a knob should drive has no default answer |
+| arrays | Variadic, so "the parameter" is not one slot |
+| output pins | Written by the call. Pointing velocity at one would mean the message overwrote a return value |
+
+So `void Sweep(FVector Origin, float Pitch, float Level)` gets velocity → `Pitch` and
+pitch → `Level`, skipping `Origin` entirely. A function with one numeric parameter gets
+velocity only. A trigger gets neither and stays on the untouched path.
+
+This is **additive only**, and it is the same discipline as the rest of Auto-Map:
+
+- It fills the pair only when **both** are still empty. Name one yourself and Auto-Map
+  leaves the row alone entirely — it will not complete your sentence, because naming one
+  and leaving the other blank is itself a statement.
+- Running Auto-Map twice changes nothing.
+- It applies to **existing** rows as well as new ones, so an asset authored before this
+  feature picks the assignment up by clicking Auto-Map From Level again.
+
+**Validate Against Level does not fill them in.** Validate never edits and never dirties
+the package — that is what makes it safe to click on an asset you are unsure about — so
+instead it counts the rows that could be filled and says so in the log. `OSCulator.MIDIValidate`
+reports the same count.
 
 ### Auto-Map
 

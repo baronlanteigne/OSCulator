@@ -37,6 +37,16 @@ public:
 	UFUNCTION()
 	void Fire(FVector Dir, FName Mode, float Power);
 
+	/**
+	 * Two scalars sitting BEHIND a multi-slot parameter: vec3(3), then slots 3 and 4.
+	 *
+	 * The target for per-parameter MIDI assignment. Neither scalar is reachable by
+	 * declaration order, which is the whole point -- a positional scheme can only ever
+	 * fill Origin here, so this signature is what proves a named assignment works.
+	 */
+	UFUNCTION()
+	void Sweep(FVector Origin, float Pitch, float Level);
+
 	/** A trigger. Zero arguments, and therefore never coalesced later on. */
 	UFUNCTION()
 	void Stop();
@@ -117,6 +127,10 @@ public:
 	UPROPERTY() TArray<float> LastPoints;
 
 	UPROPERTY() float LastAccumulated = 0.0f;
+
+	UPROPERTY() FVector LastSweepOrigin = FVector::ZeroVector;
+	UPROPERTY() float LastSweepPitch = 0.0f;
+	UPROPERTY() float LastSweepLevel = 0.0f;
 };
 
 /** Carries its tag in the class defaults, the way a Blueprint with tags set in

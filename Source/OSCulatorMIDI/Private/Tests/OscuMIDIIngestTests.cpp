@@ -44,6 +44,15 @@ namespace OscuMIDITest
 		Binding.Tag = FName(Tag);
 		Binding.FunctionName = FName(FunctionName);
 		Binding.Sources.Append(Sources);
+
+		// The kind lives on the binding now and is mirrored down onto every source, so a
+		// test that set it only on the source would have it overwritten by Refresh. Taken
+		// from the first source so every existing call site still reads as it did.
+		if (Binding.Sources.Num() > 0)
+		{
+			Binding.Type = Binding.Sources[0].Type;
+		}
+
 		return Binding;
 	}
 
@@ -366,18 +375,74 @@ bool FOscuMIDISharedInputTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("...with its own shaping"), Cube->LastIntensity, 1.0);
 	}
 
-	// Several sources on one binding: a pad and a knob reaching the same function.
+	// Several sources on one binding: two pads reaching the same function.
+	//
+	// All of one kind, because Type is a property of the binding now. Two notes, two
+	// channels, one target.
 	{
 		UOscuMIDIMap* Multi = MakeMap({
-			Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("40")), ControlChange(2, 7) }),
+			Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("40")), NoteOn(2, TEXT("41")) }),
 		});
 		FScopedActiveMap Active(Multi);
 
-		TestEqual(TEXT("The note source fires it"), MIDI->IngestNote(1, 40, 127, true), 1);
+		TestEqual(TEXT("The first source fires it"), MIDI->IngestNote(1, 40, 127, true), 1);
 		TestEqual(TEXT("...remapped"), Laser->LastIntensity, 1.0);
 
-		TestEqual(TEXT("The CC source fires the same function"), MIDI->IngestControlChange(2, 7, 0), 1);
-		TestEqual(TEXT("...through the same shaping"), Laser->LastIntensity, 0.0);
+		TestEqual(TEXT("The second source fires the same function"), MIDI->IngestNote(2, 41, 0, false), 0);
+		TestEqual(TEXT("...and a release is ignored without On Note Off"), Laser->LastIntensity, 1.0);
+
+		TestEqual(TEXT("The second source fires on press"), MIDI->IngestNote(2, 41, 64, true), 1);
+		TestTrue(TEXT("...through the same shaping"),
+			FMath::IsNearlyEqual(Laser->LastIntensity, 64.0 / 127.0, 1e-6));
+	}
+
+	// A pad AND a knob on one function is now two bindings, not two sources.
+	//
+	// This is the deliberate cost of making Type per function: the kinds behave
+	// differently enough -- a note has a pitch and a release, a controller has neither --
+	// that one row answering to both left half its value settings meaningless. The
+	// capability is not gone, it is spelled differently, and both rows still fire.
+	{
+		FOscuMIDIBinding FromPad = Bind(TEXT("laser"), TEXT("SetIntensity"), { NoteOn(1, TEXT("42")) });
+		FOscuMIDIBinding FromKnob = Bind(TEXT("laser"), TEXT("SetIntensity"), { ControlChange(2, 7) });
+
+		UOscuMIDIMap* Split = MakeMap({ FromPad, FromKnob });
+		FScopedActiveMap Active(Split);
+
+		TestEqual(TEXT("the note row is note-driven"),
+			static_cast<int32>(Split->Bindings[0].Type), static_cast<int32>(EOscuMIDIInputType::Note));
+		TestEqual(TEXT("the knob row is controller-driven"),
+			static_cast<int32>(Split->Bindings[1].Type), static_cast<int32>(EOscuMIDIInputType::ControlChange));
+
+		TestEqual(TEXT("the pad drives it"), MIDI->IngestNote(1, 42, 127, true), 1);
+		TestEqual(TEXT("...remapped"), Laser->LastIntensity, 1.0);
+
+		TestEqual(TEXT("and the knob drives the same function"), MIDI->IngestControlChange(2, 7, 0), 1);
+		TestEqual(TEXT("...through its own row's shaping"), Laser->LastIntensity, 0.0);
+	}
+
+	// A source cannot disagree with its binding: the kind is mirrored down.
+	{
+		FOscuMIDIBinding Mixed;
+		Mixed.Tag = FName("laser");
+		Mixed.FunctionName = FName("SetIntensity");
+		Mixed.Type = EOscuMIDIInputType::Note;
+
+		// Built as a controller, on a note-driven row. After Refresh it is a note source,
+		// and its number is reinterpreted -- CC 7 becomes note 7.
+		Mixed.Sources.Add(ControlChange(3, 7));
+
+		UOscuMIDIMap* Map2 = NewObject<UOscuMIDIMap>(GetTransientPackage());
+		Map2->Bindings.Add(Mixed);
+		Map2->Refresh();
+
+		TestEqual(TEXT("the source adopted the binding's kind"),
+			static_cast<int32>(Map2->Bindings[0].Sources[0].Type),
+			static_cast<int32>(EOscuMIDIInputType::Note));
+
+		FScopedActiveMap Active(Map2);
+		TestEqual(TEXT("so a control change no longer reaches it"),
+			MIDI->IngestControlChange(3, 7, 127), 0);
 	}
 
 	// A source naming a device accepts only that device; one naming none accepts all.

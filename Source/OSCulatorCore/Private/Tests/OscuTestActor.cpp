@@ -11,6 +11,15 @@ void AOscuTestActor::Fire(FVector Dir, FName Mode, float Power)
 	LastPower = Power;
 }
 
+void AOscuTestActor::Sweep(FVector Origin, float Pitch, float Level)
+{
+	++CallCount;
+	LastCalled = TEXT("Sweep");
+	LastSweepOrigin = Origin;
+	LastSweepPitch = Pitch;
+	LastSweepLevel = Level;
+}
+
 void AOscuTestActor::Stop()
 {
 	++CallCount;
