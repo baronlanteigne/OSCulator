@@ -3,6 +3,11 @@
 OSCulator is an OSC + MIDI plugin for Unreal Engine, designed to simplify
 bi-directional interaction between multiple tools.
 
+## Video Tutorials
+**Get Started / OSC In: https://youtu.be/gXMZ8Na-vls**
+
+**MIDI In Mapping: https://youtu.be/_J8eaGlQ7CE**
+
 ## Key features
 
 - **Call any Blueprint event over OSC or MIDI** by tagging its actor. Several actors
@@ -32,10 +37,6 @@ bi-directional interaction between multiple tools.
   features once you are done authoring.
 
 ## Quick start
-
-**Get Started Tutorial: https://youtu.be/gXMZ8Na-vls**
-
-**MIDI In Mapping Tutorial: https://youtu.be/_J8eaGlQ7CE**
 
 This repository *is* a working demo project — clone it, open `OSCulator.uproject`,
 build when prompted and you're ready to test osc and midi map with your own tools.
