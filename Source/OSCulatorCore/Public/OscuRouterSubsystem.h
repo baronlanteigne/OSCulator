@@ -23,6 +23,15 @@ struct FOscuFunctionBinding
 	/** Everything introspection needs. Address is left blank here and filled in
 	 *  per tag, since one class can answer under several tags. */
 	FOscuExposedFunctionInfo Info;
+
+	/** Exposed only because bExposeAllFunctions is on, rather than by FunctionPrefix or
+	 *  ExtraAllowedFunctions. On a component that blanket reaches Blueprint-authored
+	 *  functions only -- see IsExposedOnComponent. */
+	bool bBlanketExposure = false;
+
+	/** The first parameter the message fills is text -- a Name, String or Text -- so
+	 *  the address-leaf fallback may call this with the end of the address in it. */
+	bool bTakesAddressLeaf = false;
 };
 
 /** Every exposed function on one class. Built once per class, per world session. */
@@ -67,7 +76,18 @@ public:
 	/**
 	 * Routes one message to every tagged actor that has the function.
 	 *
-	 * The address must be /tag/function -- no wildcards, no deeper nesting.
+	 * The address is /tag/function. Deeper segments join with '_' into the function
+	 * name, so /tag/Beam/Width calls Beam_Width. No wildcards.
+	 *
+	 * When nothing answers the full name, the end of it is tried as an argument: the
+	 * name is shortened one '_' piece at a time, and the first shorter function whose
+	 * first parameter is text is called with the remainder there. So /tag/mat/Emissive,
+	 * with no mat_Emissive anywhere, calls mat("Emissive", ...). The exact name always
+	 * wins, and only a miss pays for the extra lookups.
+	 *
+	 * An actor whose class lacks the function answers through its components instead:
+	 * every component of it that exposes the function is called. The actor is asked
+	 * first, so a child class declaring the same function overrides the component's.
 	 *
 	 * Returns how many actors were actually called. When OutError is supplied it
 	 * receives any rejection reason and nothing is logged, leaving reporting to the
@@ -137,6 +157,10 @@ public:
 	 *
 	 * OutArgCount receives how many slots the parameter occupies, so a caller can tell
 	 * a float apart from a vec3 it is about to under-fill.
+	 *
+	 * A FunctionName that only the address-leaf fallback resolves -- mat_Emissive
+	 * reaching mat -- is answered as dispatch would call it: the leading text parameter
+	 * is filled from the address, so it has no slot and the slots after it start at 0.
 	 */
 	int32 FindParamSlot(FName Tag, FName FunctionName, FName ParamName, int32* OutArgCount = nullptr) const;
 
@@ -171,6 +195,18 @@ public:
 
 private:
 	void OnActorSpawned(AActor* Actor);
+
+	/** The binding an actor answers a function with: its own class first, then the
+	 *  first of its components that exposes it. Null when neither does. */
+	const FOscuFunctionBinding* FindBindingOnActor(const AActor* Actor, FName FunctionName) const;
+
+	/**
+	 * FindExposedFunction, then the address-leaf fallback DispatchMessage would take.
+	 * bOutLeaf says the fallback answered, in which case the binding's first message
+	 * parameter is filled from the address rather than from the arguments -- so a
+	 * caller counting slots must not count it.
+	 */
+	const FOscuFunctionBinding* FindExposedFunctionOrLeaf(FName Tag, FName FunctionName, bool& bOutLeaf) const;
 
 	/**
 	 * Whether a rejection is worth a log line, given how many times we have already

@@ -239,8 +239,15 @@ bool FOscuDispatchStrictTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Unknown function is reported"), Error.IsEmpty());
 
 	Error.Reset();
-	Router->DispatchMessage(Make(TEXT("/laser/Fire/extra"), {}), EOscuArgPolicy::Strict, &Error);
+	Router->DispatchMessage(Make(TEXT("/laser"), {}), EOscuArgPolicy::Strict, &Error);
 	TestTrue(FString::Printf(TEXT("Malformed address is reported: %s"), *Error), Error.Contains(TEXT("/tag/function")));
+
+	// A deeper address is well formed -- it names Fire_extra -- and is refused only
+	// because nothing declares that.
+	Error.Reset();
+	const int32 NestedCalls = Router->DispatchMessage(Make(TEXT("/laser/Fire/extra"), {}), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("Nested address to a missing function calls nothing"), NestedCalls, 0);
+	TestFalse(TEXT("...and is reported"), Error.IsEmpty());
 
 	return true;
 }
@@ -365,6 +372,258 @@ bool FOscuDispatchEdgeCaseTest::RunTest(const FString& Parameters)
 		Make(TEXT("/laser/ExecuteUbergraph_OscuTestActor"), { N(4172.0) }), EOscuArgPolicy::Strict, &Error);
 	TestEqual(TEXT("ExecuteUbergraph_* cannot be dispatched"), Calls, 0);
 	TestFalse(TEXT("...and the refusal is reported"), Error.IsEmpty());
+
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Deeper addresses join into one function name
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuDispatchNestedAddressTest,
+	"OSCulator.Dispatch.NestedAddress",
+	OscuTest::Flags)
+
+bool FOscuDispatchNestedAddressTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuDispatchTest;
+
+	FScopedTestWorld Scope;
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	Scope.BeginPlay();
+
+	UOscuRouterSubsystem* Router = Scope.Router();
+	if (!TestNotNull(TEXT("Router subsystem exists"), Router))
+	{
+		return false;
+	}
+
+	// The grouped form a sender's parameter pages produce.
+	FString Error;
+	int32 Calls = Router->DispatchMessage(Make(TEXT("/laser/Beam/Width"), { N(0.25) }), EOscuArgPolicy::Strict, &Error);
+	TestTrue(FString::Printf(TEXT("Nested address dispatched (%s)"), *Error), Error.IsEmpty());
+	TestEqual(TEXT("One actor called"), Calls, 1);
+	TestEqual(TEXT("Segments joined with '_'"), Laser->LastCalled, FName("Beam_Width"));
+	TestEqual(TEXT("Value arrived"), Laser->LastWidth, 0.25f);
+
+	// The flat form reaches the same function.
+	Error.Reset();
+	Calls = Router->DispatchMessage(Make(TEXT("/laser/Beam_Width"), { N(0.5) }), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("Flat address reaches the same function"), Calls, 1);
+	TestEqual(TEXT("...with its value"), Laser->LastWidth, 0.5f);
+
+	// Argument counting is unchanged by the nesting.
+	Error.Reset();
+	Calls = Router->DispatchMessage(Make(TEXT("/laser/Beam/Width"), {}), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("Too few arguments still refused"), Calls, 0);
+	TestFalse(TEXT("...and reported"), Error.IsEmpty());
+
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// The end of an address can be an argument
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuDispatchAddressLeafTest,
+	"OSCulator.Dispatch.AddressLeaf",
+	OscuTest::Flags)
+
+bool FOscuDispatchAddressLeafTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuDispatchTest;
+
+	FScopedTestWorld Scope;
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	Scope.BeginPlay();
+
+	UOscuRouterSubsystem* Router = Scope.Router();
+	if (!TestNotNull(TEXT("Router subsystem exists"), Router))
+	{
+		return false;
+	}
+
+	// No MatParam_Emissive exists, so MatParam is called with the leaf in front.
+	FString Error;
+	int32 Calls = Router->DispatchMessage(
+		Make(TEXT("/laser/MatParam/Emissive"), { N(0.5), N(0.7) }), EOscuArgPolicy::Strict, &Error);
+	TestTrue(FString::Printf(TEXT("Leaf address dispatched (%s)"), *Error), Error.IsEmpty());
+	TestEqual(TEXT("One actor called"), Calls, 1);
+	TestEqual(TEXT("The shorter function answered"), Laser->LastCalled, FName("MatParam"));
+	TestEqual(TEXT("The leaf arrived as the name"), Laser->LastMatName, FName("Emissive"));
+	TestEqual(TEXT("The message's own arguments follow it"), Laser->LastMatDuration, 0.5f);
+	if (TestEqual(TEXT("...into the trailing array"), Laser->LastMatValues.Num(), 1))
+	{
+		TestEqual(TEXT("...with its value"), Laser->LastMatValues[0], 0.7f);
+	}
+
+	// A leaf containing '_' is kept whole: MatParam_Base is not interned, so the peel
+	// carries on to MatParam with Base_Color.
+	Error.Reset();
+	Calls = Router->DispatchMessage(
+		Make(TEXT("/laser/MatParam/Base_Color"), { N(0.0), N(1.0), N(0.0), N(0.0) }), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("Leaf with '_' dispatched"), Calls, 1);
+	TestEqual(TEXT("...whole"), Laser->LastMatName, FName("Base_Color"));
+	TestEqual(TEXT("...with a colour's worth of values"), Laser->LastMatValues.Num(), 3);
+
+	// The flat form peels the same way, so a MIDI binding naming MatParam_Emissive works.
+	Error.Reset();
+	Calls = Router->DispatchMessage(Make(TEXT("/laser/MatParam_Emissive"), { N(0.25) }), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("Flat leaf address dispatched"), Calls, 1);
+	TestEqual(TEXT("...with the leaf"), Laser->LastMatName, FName("Emissive"));
+
+	// Only text takes a leaf. Beam_Width wants a float, so the typo is refused rather
+	// than called with a word in it.
+	Laser->LastWidth = 0.75f;
+	Error.Reset();
+	Calls = Router->DispatchMessage(Make(TEXT("/laser/Beam/Width/extra"), { N(0.25) }), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("A non-text first parameter is not a leaf target"), Calls, 0);
+	TestFalse(TEXT("...and the miss is reported"), Error.IsEmpty());
+	TestEqual(TEXT("...and Beam_Width was not called"), Laser->LastWidth, 0.75f);
+
+	// Argument counting includes the leaf: Name and Duration are both required.
+	Error.Reset();
+	Calls = Router->DispatchMessage(Make(TEXT("/laser/MatParam/Emissive"), {}), EOscuArgPolicy::Strict, &Error);
+	TestEqual(TEXT("Too few arguments still refused"), Calls, 0);
+
+	// MIDI asks for slots by the name it dispatches under. The leaf has no slot, and
+	// the parameters after it count from zero, because the address fills it.
+	const FName LaserTag = FName(TEXT("laser"));
+	const FName Flat = FName(TEXT("MatParam_Emissive"));
+	TestEqual(TEXT("Duration is slot 0 through the leaf"), Router->FindParamSlot(LaserTag, Flat, FName(TEXT("Duration"))), 0);
+	TestEqual(TEXT("Values is slot 1 through the leaf"), Router->FindParamSlot(LaserTag, Flat, FName(TEXT("Values"))), 1);
+	TestEqual(TEXT("The leaf itself has no slot"), Router->FindParamSlot(LaserTag, Flat, FName(TEXT("Name"))), INDEX_NONE);
+	TestEqual(TEXT("Called directly, Name is slot 0"),
+		Router->FindParamSlot(LaserTag, FName(TEXT("MatParam")), FName(TEXT("Name"))), 0);
+
+	TArray<FOscuExposedParamInfo> Params;
+	TArray<int32> Slots;
+	if (TestTrue(TEXT("Described through the leaf"), Router->DescribeParams(LaserTag, Flat, Params, Slots)))
+	{
+		TestEqual(TEXT("...without the leaf parameter"), Params.Num(), 2);
+	}
+
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Components answer for their actor
+
+namespace OscuDispatchTest
+{
+	/** Restores ExtraAllowedFunctions, so an opt-in cannot leak into later tests. */
+	struct FScopedExtraAllowed
+	{
+		explicit FScopedExtraAllowed(std::initializer_list<FName> Names)
+		{
+			Settings = GetMutableDefault<UOscuSettings>();
+			Saved = Settings->ExtraAllowedFunctions;
+			Settings->ExtraAllowedFunctions = TArray<FName>(Names);
+		}
+
+		~FScopedExtraAllowed()
+		{
+			Settings->ExtraAllowedFunctions = Saved;
+		}
+
+		FScopedExtraAllowed(const FScopedExtraAllowed&) = delete;
+		FScopedExtraAllowed& operator=(const FScopedExtraAllowed&) = delete;
+
+	private:
+		UOscuSettings* Settings = nullptr;
+		TArray<FName> Saved;
+	};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuDispatchComponentTest,
+	"OSCulator.Dispatch.Components",
+	OscuTest::Flags)
+
+bool FOscuDispatchComponentTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuDispatchTest;
+
+	// Default exposure: the blanket does not reach native component functions, whether
+	// the component declares them or inherits them from the engine.
+	{
+		FScopedTestWorld Scope;
+		AOscuComponentHostTestActor* Host = Scope.SpawnTaggedAs<AOscuComponentHostTestActor>({ TEXT("OSC_host") });
+		Scope.BeginPlay();
+
+		UOscuRouterSubsystem* Router = Scope.Router();
+		if (!TestNotNull(TEXT("Router subsystem exists"), Router))
+		{
+			return false;
+		}
+
+		FString Error;
+		int32 Calls = Router->DispatchMessage(
+			Make(TEXT("/host/Nudge"), { N(1.0), N(2.0), N(3.0), N(0.5) }), EOscuArgPolicy::Strict, &Error);
+		TestEqual(TEXT("Native component function stays shut under the blanket"), Calls, 0);
+		TestEqual(TEXT("...so the component was not called"), Host->First->NudgeCount, 0);
+
+		Error.Reset();
+		Calls = Router->DispatchMessage(Make(TEXT("/host/Activate"), { N(0.0) }), EOscuArgPolicy::Strict, &Error);
+		TestEqual(TEXT("Inherited engine component functions are not exposed"), Calls, 0);
+	}
+
+	// Opted in: what Blueprint-authored component functions get by default.
+	{
+		FScopedExtraAllowed Allow({ FName(TEXT("Nudge")), FName(TEXT("Ping")) });
+
+		FScopedTestWorld Scope;
+		AOscuComponentHostTestActor* Host = Scope.SpawnTaggedAs<AOscuComponentHostTestActor>({ TEXT("OSC_host") });
+		Scope.BeginPlay();
+
+		UOscuRouterSubsystem* Router = Scope.Router();
+		if (!TestNotNull(TEXT("Router subsystem exists"), Router))
+		{
+			return false;
+		}
+
+		// The actor has no Nudge, so its components answer -- both of them.
+		FString Error;
+		int32 Calls = Router->DispatchMessage(
+			Make(TEXT("/host/Nudge"), { N(1.0), N(2.0), N(3.0), N(0.5) }), EOscuArgPolicy::Strict, &Error);
+		TestTrue(FString::Printf(TEXT("Component dispatch succeeded (%s)"), *Error), Error.IsEmpty());
+		TestEqual(TEXT("Both components called"), Calls, 2);
+		TestEqual(TEXT("First component called once"), Host->First->NudgeCount, 1);
+		TestEqual(TEXT("Second component called once"), Host->Second->NudgeCount, 1);
+		TestEqual(TEXT("Vector assembled for a component"), Host->First->LastOffset, FVector(1.0, 2.0, 3.0));
+		TestEqual(TEXT("Trailing float for a component"), Host->Second->LastDuration, 0.5f);
+
+		// The actor declares Ping too, and is asked first: an override, not a broadcast.
+		Error.Reset();
+		Calls = Router->DispatchMessage(Make(TEXT("/host/Ping"), {}), EOscuArgPolicy::Strict, &Error);
+		TestEqual(TEXT("Only the actor answered"), Calls, 1);
+		TestEqual(TEXT("Actor's Ping ran"), Host->PingCount, 1);
+		TestEqual(TEXT("First component's Ping did not"), Host->First->PingCount, 0);
+		TestEqual(TEXT("Second component's Ping did not"), Host->Second->PingCount, 0);
+
+		// Argument counting applies to component targets as it does to actors.
+		Error.Reset();
+		Calls = Router->DispatchMessage(
+			Make(TEXT("/host/Nudge"), { N(1.0), N(2.0), N(3.0) }), EOscuArgPolicy::Strict, &Error);
+		TestEqual(TEXT("Too few arguments refused for a component"), Calls, 0);
+		TestFalse(TEXT("...and reported"), Error.IsEmpty());
+
+		// Listed under the owner's tag, which is what MIDI Auto-Map and /_describe read.
+		const TArray<FOscuExposedTagInfo> Tags = Router->Introspect(EOscuIntrospectFilter::All, FName(TEXT("host")));
+		if (TestEqual(TEXT("One tag described"), Tags.Num(), 1))
+		{
+			const FOscuExposedFunctionInfo* Nudge = FindFunction(Tags[0], TEXT("Nudge"));
+			if (TestNotNull(TEXT("Component function introspected"), Nudge))
+			{
+				TestEqual(TEXT("...at the owner's address"), Nudge->Address, FString(TEXT("/host/Nudge")));
+				TestEqual(TEXT("...with its signature"), Nudge->TotalArgCount, 4);
+			}
+			TestNull(TEXT("Inherited engine component functions are not introspected"), FindFunction(Tags[0], TEXT("Activate")));
+		}
+	}
 
 	return true;
 }

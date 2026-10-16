@@ -94,6 +94,22 @@ void AOscuTestActor::Accumulate(float& Running)
 	Running += 1.0f;
 }
 
+void AOscuTestActor::Beam_Width(float Width)
+{
+	++CallCount;
+	LastCalled = TEXT("Beam_Width");
+	LastWidth = Width;
+}
+
+void AOscuTestActor::MatParam(FName Name, float Duration, const TArray<float>& Values)
+{
+	++CallCount;
+	LastCalled = TEXT("MatParam");
+	LastMatName = Name;
+	LastMatDuration = Duration;
+	LastMatValues = Values;
+}
+
 void AOscuTestActor::Attach(AActor* Other) {}
 void AOscuTestActor::BadArray(const TArray<float>& Values, float Trailing) {}
 void AOscuTestActor::ExecuteUbergraph_OscuTestActor(int32 EntryPoint) {}
@@ -107,4 +123,27 @@ void AOscuPreTaggedTestActor::Pulse(float Amount)
 {
 	++CallCount;
 	LastAmount = Amount;
+}
+
+void UOscuTestComponent::Nudge(FVector Offset, float Duration)
+{
+	++NudgeCount;
+	LastOffset = Offset;
+	LastDuration = Duration;
+}
+
+void UOscuTestComponent::Ping()
+{
+	++PingCount;
+}
+
+AOscuComponentHostTestActor::AOscuComponentHostTestActor()
+{
+	First = CreateDefaultSubobject<UOscuTestComponent>(TEXT("First"));
+	Second = CreateDefaultSubobject<UOscuTestComponent>(TEXT("Second"));
+}
+
+void AOscuComponentHostTestActor::Ping()
+{
+	++PingCount;
 }
