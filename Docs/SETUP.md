@@ -55,9 +55,39 @@ The prefix is configurable (**Registry → Tag Prefix**, default `OSC_`).
 
 ```
 /<tag>/<FunctionName>
+/<tag>/<Group>/<Leaf>        → calls Group_Leaf
 ```
 
-Exactly two segments. No wildcards, no deeper nesting.
+Segments after the tag **join with `_`** into one function name, so `/laser/Beam/Width`
+calls `Beam_Width` and `/laser/Beam/Color/R` calls `Beam_Color_R`. That keeps a sender's
+grouped layout — the prefixed parameter pages a TouchDesigner OSC Out builds — while the
+receiving side stays one function per leaf. The flat `/laser/Beam_Width` reaches the same
+function. No wildcards.
+
+### The end of an address as an argument
+
+When **nothing** answers the full joined name, the end of it is tried as an argument. The
+name is shortened one `_` piece at a time from the right, and the first shorter function
+whose **first parameter is text** (Name, String or Text) is called with the peeled-off
+remainder in that parameter, ahead of the message's own arguments:
+
+```
+/laser/Mat/Emissive [0.5, 0, 0.7]    no Mat_Emissive anywhere  → Mat("Emissive", 0.5, 0, 0.7)
+/laser/Mat/Base_Color [...]          no Mat_Base either        → Mat("Base_Color", ...)
+```
+
+One event then serves a whole page of material parameters, each on its own address, with
+no event per parameter. Pair it with [`Resolve Material Parameter Value`](HELPERS.md) and a
+trailing array so the same event takes scalars and colours.
+
+- **The exact name always wins.** The fallback only runs on a miss, so an address that
+  resolves directly costs nothing extra.
+- **Text first is the opt-in.** A function whose first parameter is a number is never a
+  fallback target, so a typo like `/laser/Beam/Width/extra` is refused rather than calling
+  `Beam_Width` with a word where its float should be.
+- **Longest name first.** `Mat_Base_Color` tries `Mat_Base("Color")` before `Mat("Base_Color")`.
+- **The leaf counts as an argument** for argument checking, and it has no MIDI slot: a MIDI
+  binding naming `Mat_Emissive` addresses `Mat`'s *other* parameters, counted from zero.
 
 ### Which functions are exposed
 
@@ -73,6 +103,27 @@ Blueprint compiler's entire event graph behind one `int32` bytecode offset, so
 calling it with an arbitrary integer jumps into the middle of your graph.
 
 Use `OSCulator.List Custom` to see just your own Blueprint events.
+
+### Components answer for their actor
+
+A function can live on a **component** of the tagged actor rather than on the actor
+itself. Give a reusable component a `Move(FVector Target, float Duration)` event, add the
+component to any number of actor classes, tag the actors — `/laser/Move` reaches it with no
+per-actor wiring.
+
+- **The actor is asked first.** If the actor's class (a child Blueprint included) declares
+  the function, that one runs and its components are not called — the same as an override
+  that does not call its parent. Call the component from the actor's version if you want
+  both.
+- **Otherwise every component that has it is called.** Two components declaring `Move` on
+  one actor both run, the same way two actors sharing a tag both run.
+- **Only Blueprint-authored component functions are exposed** by the blanket
+  `Expose All Functions`. Extending it to components would put every inherited engine call
+  (`SetVisibility`, `Activate`, every Physics Control function) live under the owner's tag.
+  `Function Prefix` and `Extra Allowed Functions` are explicit opt-ins and apply to
+  components as written, native or not.
+- Component functions appear under the owner's tag in `OSCulator.List`, `/_describe`, and
+  MIDI Auto-Map, exactly like the actor's own.
 
 ### Parameter types
 
@@ -94,6 +145,36 @@ What each parameter type costs on the wire. Values are consumed in order.
 A parameter of any other type — an object reference, an unlisted struct — excludes the
 whole function from the registry. `OSCulator.List` prints each signature with these
 labels, so it always agrees with what the marshaller will do.
+
+### Enum parameters
+
+An enum takes one value, sent either of two ways:
+
+- **A number** is the entry's value, which for a Blueprint enum is its position in the
+  list, counting from 0. Decimals are cut off, so `2.9` is `2`. The range is not checked:
+  a number past the last entry arrives as a value the enum does not have, and what the
+  function makes of it is up to the function.
+- **A string** is the entry's name — `"OutQuad"`, or the long form `"ELTweenEase::OutQuad"`.
+  A name that matches no entry is read as a number instead, which for a word is `0`: the
+  first entry.
+
+### Missing values are zero, not your defaults
+
+Unreal applies a parameter's default only on a call node in a graph. OSCulator calls the
+function directly, so a value the message does not carry is **zero** — `0`, `false`, an
+empty name, an enum's first entry — never what the Blueprint shows as a default. Custom
+events have no input defaults to begin with.
+
+Whether that can happen depends on the transport:
+
+- **OSC** uses Strict, below: too few arguments is refused outright, so nothing runs on
+  values that were never sent.
+- **MIDI** is always lenient, because one knob rarely supplies a whole signature. Every
+  parameter it does not fill is zero — see [What the function receives](#what-the-function-receives).
+
+To have a real default, decide it inside the event: a `Select` on "is Duration 0" that
+substitutes `0.5`, for instance. Zero then means "use the default", so pick a default for
+which zero is never a value you want to send on purpose.
 
 ### Variable-length messages
 
@@ -505,7 +586,9 @@ Number** on, the note or CC number arrives first, unremapped, and the value seco
 
 Arguments are always accepted leniently: a zero-argument trigger simply ignores the
 value it is handed, and a signature wanting more than MIDI supplies gets zeroes for the
-rest.
+rest. Those are real zeroes, not the Blueprint's defaults — a tween's Duration arrives as
+`0` (instant) and its Ease as the enum's first entry. See
+[Missing values are zero, not your defaults](#missing-values-are-zero-not-your-defaults).
 
 ### Note ranges, and two values at once
 

@@ -84,6 +84,11 @@ tagged `OSC_laser`:
 material instance. `Interp` is yours to use — the node does no tweening, and driving the
 interpolation in-project is the intended pattern.
 
+`ParamName` can also come from the address instead of the message: with no
+`SetMaterialParam_Emissive` anywhere, `/laser/SetMaterialParam/Emissive [0.25, 0.7]` calls
+the same event with `"Emissive"` filled in. See
+[The end of an address as an argument](SETUP.md#the-end-of-an-address-as-an-argument).
+
 ### The float/double pin trap
 
 The input is a **double** array, because a Blueprint "Float" pin *is* a double in UE5. A
