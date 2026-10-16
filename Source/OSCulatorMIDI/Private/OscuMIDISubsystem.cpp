@@ -28,7 +28,7 @@ void UOscuMIDISubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// Devices are opened once the engine is fully up rather than here. At subsystem
 	// initialisation the MIDIDevice module may not have finished starting, and the
 	// settings object has not necessarily loaded its config yet.
-	PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddUObject(this, &UOscuMIDISubsystem::Restart);
+	PostEngineInitHandle = FCoreDelegates::GetOnPostEngineInit().AddUObject(this, &UOscuMIDISubsystem::Restart);
 
 	// ...unless the engine is already up, in which case that delegate has fired and
 	// will never fire again. This subsystem can be created late -- on first access
@@ -60,7 +60,7 @@ void UOscuMIDISubsystem::Deinitialize()
 {
 	if (PostEngineInitHandle.IsValid())
 	{
-		FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+		FCoreDelegates::GetOnPostEngineInit().Remove(PostEngineInitHandle);
 		PostEngineInitHandle.Reset();
 	}
 
