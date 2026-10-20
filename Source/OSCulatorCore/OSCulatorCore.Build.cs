@@ -21,5 +21,11 @@ public class OSCulatorCore : ModuleRules
 			// Only for OSCulator.Export.
 			"Json",
 		});
+
+		if (Target.bBuildEditor)
+		{
+			// Only for the "could not write OSCulator.ini" toast.
+			PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
+		}
 	}
 }

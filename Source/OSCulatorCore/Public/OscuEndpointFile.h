@@ -50,4 +50,29 @@ namespace OscuEndpointFile
 
 	/** Lines describing every difference between two files OSCulator wrote. */
 	OSCULATORCORE_API TArray<FString> Diff(const FString& BeforeText, const FString& AfterText);
+
+	/**
+	 * Where OSCulator.ini lives. Uncooked (editor, -game): <Project>/OSCulator/.
+	 * Cooked: next to the exe (<Package>/OSCulator.ini), falling back to
+	 * <Package>/<Project>/OSCulator/ if the staging remap did not move it.
+	 */
+	OSCULATORCORE_API FString GetPath();
+
+	/** Writes Settings to Path, creating the folder. False if the file cannot be written. */
+	OSCULATORCORE_API bool Save(const UOscuSettings& Settings, const FString& Path);
+
+	/**
+	 * Missing file: written from Settings (bOutCreated). Present: applied over Settings,
+	 * changes in OutOverrides, warnings logged. False only if it could not be read or created.
+	 */
+	OSCULATORCORE_API bool LoadOrCreate(UOscuSettings& Settings, const FString& Path, TArray<FString>& OutOverrides, bool& bOutCreated);
+
+	/** Called once on the settings CDO, before any transport opens. */
+	void LoadAtStartup(UOscuSettings& Settings);
+
+	/** True in the editor proper: never in -game, packaged builds or commandlets. */
+	bool ShouldSyncDefaultConfig();
+
+	/** One line for OSCulator.Status: which file loaded and what it changed. */
+	OSCULATORCORE_API FString DescribeLastLoad();
 }

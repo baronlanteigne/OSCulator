@@ -352,4 +352,40 @@ bool FOscuEndpointDiffOrderTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+//////////////////////////////////////////////////////////////////////////
+// A missing file is created from the settings; an existing one is applied
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointLoadOrCreateTest,
+	"OSCulator.EndpointFile.LoadOrCreate",
+	OscuTest::Flags)
+
+bool FOscuEndpointLoadOrCreateTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuEndpointFileTest;
+
+	const FString Path = TempPath();
+	IFileManager::Get().Delete(*Path, /*RequireExists*/ false, /*EvenReadOnly*/ true);
+
+	UOscuSettings* S = MakeSettings();
+	TArray<FString> Overrides;
+	bool bCreated = false;
+	TestTrue(TEXT("Missing file handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated));
+	TestTrue(TEXT("It was created"), bCreated);
+
+	FString OnDisk;
+	TestTrue(TEXT("File exists"), FFileHelper::LoadFileToString(OnDisk, *Path));
+	TestEqual(TEXT("Contents are the settings"), OnDisk, OscuEndpointFile::Write(*S));
+
+	// Second pass: the file now exists and differs from the settings.
+	FFileHelper::SaveStringToFile(OnDisk.Replace(TEXT("ListenPort=8000"), TEXT("ListenPort=8100")), *Path);
+	TestTrue(TEXT("Existing file handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated));
+	TestFalse(TEXT("Not re-created"), bCreated);
+	TestEqual(TEXT("Applied"), S->ListenPort, 8100);
+	TestEqual(TEXT("One override"), Overrides.Num(), 1);
+
+	IFileManager::Get().Delete(*Path, false, true);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

@@ -4,10 +4,32 @@
 #include "OSCulatorCore.h"
 #include "OscuSettings.h"
 
+#include "HAL/FileManager.h"
+#include "Misc/CoreDelegates.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+
 namespace
 {
 	const TCHAR* const OSCTargetPrefix = TEXT("OSC Target ");
 	const TCHAR* const MIDIInDevicePrefix = TEXT("MIDI In ");
+
+	FString GLastLoad = TEXT("OSCulator.ini: not loaded.");
+
+	void LogResult(const FString& Path, const TArray<FString>& Overrides, const TArray<FString>& Warnings)
+	{
+		for (const FString& Warning : Warnings)
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini %s"), *Warning);
+		}
+		for (const FString& Override : Overrides)
+		{
+			UE_LOG(LogOSCulator, Log, TEXT("OSCulator.ini overrides %s"), *Override);
+		}
+		GLastLoad = FString::Printf(TEXT("OSCulator.ini: %s -- %d override(s), %d warning(s)."),
+			*Path, Overrides.Num(), Warnings.Num());
+		UE_LOG(LogOSCulator, Log, TEXT("%s"), *GLastLoad);
+	}
 
 	/** About the section as a whole: points at its [header] line. */
 	void Warn(TArray<FString>& Warnings, const FOscuIniSection& Section, const FString& Message)
@@ -236,12 +258,12 @@ FString OscuEndpointFile::Write(const UOscuSettings& S)
 		const FString Name = Target.Name.IsNone() ? FString() : Target.Name.ToString().TrimStartAndEnd();
 		if (Name.IsEmpty())
 		{
-			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: OSC target #%d not written: its name is blank."), Index);
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: OSC target #%d skipped: its name is blank. It is not written to OSCulator.ini and will be dropped from Project Settings the next time the file is applied."), Index);
 			continue;
 		}
 		if (WrittenTargets.Contains(Name))
 		{
-			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: OSC target #%d '%s' not written: its name repeats an earlier target."), Index, *Name);
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: OSC target #%d '%s' skipped: its name repeats an earlier target. It is not written to OSCulator.ini and will be dropped from Project Settings the next time the file is applied."), Index, *Name);
 			continue;
 		}
 		WrittenTargets.Add(Name);
@@ -264,12 +286,12 @@ FString OscuEndpointFile::Write(const UOscuSettings& S)
 		const FString Name = Device.Name.TrimStartAndEnd();
 		if (Name.IsEmpty())
 		{
-			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: MIDI In device #%d not written: its name is blank."), Index);
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: MIDI In device #%d skipped: its name is blank. It is not written to OSCulator.ini and will be dropped from Project Settings the next time the file is applied."), Index);
 			continue;
 		}
 		if (WrittenDevices.Contains(Name))
 		{
-			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: MIDI In device #%d '%s' not written: its name repeats an earlier device."), Index, *Name);
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: MIDI In device #%d '%s' skipped: its name repeats an earlier device. It is not written to OSCulator.ini and will be dropped from Project Settings the next time the file is applied."), Index, *Name);
 			continue;
 		}
 		WrittenDevices.Add(Name);
@@ -454,4 +476,111 @@ TArray<FString> OscuEndpointFile::Diff(const FString& BeforeText, const FString&
 		}
 	}
 	return Lines;
+}
+
+FString OscuEndpointFile::GetPath()
+{
+	const FString InProject = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectDir(), TEXT("OSCulator"), TEXT("OSCulator.ini")));
+
+	if (!FPlatformProperties::RequiresCookedData())
+	{
+		return InProject;
+	}
+
+	const FString NextToExe = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::RootDir(), TEXT("OSCulator.ini")));
+	if (!FPaths::FileExists(NextToExe) && FPaths::FileExists(InProject))
+	{
+		return InProject;
+	}
+	return NextToExe;
+}
+
+bool OscuEndpointFile::Save(const UOscuSettings& Settings, const FString& Path)
+{
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree*/ true);
+
+	// Write beside it, then swap: a hard reset mid-write must never leave a
+	// truncated OSCulator.ini behind (this machine has Kernel-Power 41 resets).
+	const FString Temp = Path + TEXT(".tmp");
+	if (!FFileHelper::SaveStringToFile(Write(Settings), *Temp, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		return false;
+	}
+	return IFileManager::Get().Move(*Path, *Temp, /*Replace*/ true, /*EvenIfReadOnly*/ false);
+}
+
+bool OscuEndpointFile::LoadOrCreate(UOscuSettings& Settings, const FString& Path, TArray<FString>& OutOverrides, bool& bOutCreated)
+{
+	OutOverrides.Reset();
+	bOutCreated = false;
+
+	if (!FPaths::FileExists(Path))
+	{
+		if (!Save(Settings, Path))
+		{
+			GLastLoad = FString::Printf(TEXT("OSCulator.ini: %s is missing and could not be created; using Project Settings."), *Path);
+			UE_LOG(LogOSCulator, Warning, TEXT("%s"), *GLastLoad);
+			return false;
+		}
+		bOutCreated = true;
+		GLastLoad = FString::Printf(TEXT("OSCulator.ini: created %s from Project Settings."), *Path);
+		UE_LOG(LogOSCulator, Log, TEXT("%s"), *GLastLoad);
+		return true;
+	}
+
+	FString Text;
+	if (!FFileHelper::LoadFileToString(Text, *Path))
+	{
+		GLastLoad = FString::Printf(TEXT("OSCulator.ini: %s could not be read (locked?); using Project Settings."), *Path);
+		UE_LOG(LogOSCulator, Warning, TEXT("%s"), *GLastLoad);
+		return false;
+	}
+
+	TArray<FString> Warnings;
+	OutOverrides = Apply(Text, Settings, Warnings);
+	LogResult(Path, OutOverrides, Warnings);
+	return true;
+}
+
+bool OscuEndpointFile::ShouldSyncDefaultConfig()
+{
+#if WITH_EDITOR
+	return GIsEditor && !IsRunningGame() && !IsRunningCommandlet();
+#else
+	return false;
+#endif
+}
+
+void OscuEndpointFile::LoadAtStartup(UOscuSettings& Settings)
+{
+	if (IsRunningCommandlet())
+	{
+		// Cooking and other commandlets must not create files or change the CDO.
+		return;
+	}
+
+	TArray<FString> Overrides;
+	bool bCreated = false;
+	LoadOrCreate(Settings, GetPath(), Overrides, bCreated);
+
+	if (Overrides.Num() > 0)
+	{
+		// GIsEditor is not dependable this early, and writing DefaultGame.ini during
+		// module load is asking for trouble: decide and write once the engine is up.
+		FCoreDelegates::GetOnPostEngineInit().AddLambda([]()
+		{
+			if (ShouldSyncDefaultConfig())
+			{
+				GetMutableDefault<UOscuSettings>()->TryUpdateDefaultConfigFile();
+				UE_LOG(LogOSCulator, Log, TEXT("OSCulator.ini values copied into Project Settings (DefaultGame.ini)."));
+			}
+		});
+	}
+}
+
+FString OscuEndpointFile::DescribeLastLoad()
+{
+	return GLastLoad;
 }

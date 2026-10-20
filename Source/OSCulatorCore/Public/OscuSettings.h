@@ -230,6 +230,8 @@ public:
 	// member is an error rather than a redundancy.
 	static FOscuSettingsChanged OnSettingsChanged;
 
+	virtual void PostInitProperties() override;
+
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
