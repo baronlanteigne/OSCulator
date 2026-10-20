@@ -1,6 +1,7 @@
 // Copyright Baron Lanteigne. All Rights Reserved.
 
 #include "OscuEndpointFile.h"
+#include "OSCulatorCore.h"
 #include "OscuSettings.h"
 
 namespace
@@ -8,14 +9,21 @@ namespace
 	const TCHAR* const OSCTargetPrefix = TEXT("OSC Target ");
 	const TCHAR* const MIDIInDevicePrefix = TEXT("MIDI In ");
 
+	/** About the section as a whole: points at its [header] line. */
 	void Warn(TArray<FString>& Warnings, const FOscuIniSection& Section, const FString& Message)
 	{
 		Warnings.Add(FString::Printf(TEXT("line %d [%s]: %s"), Section.Line, *Section.Name, *Message));
 	}
 
-	void WarnBadValue(TArray<FString>& Warnings, const FOscuIniSection& Section, const FString& Key, const FString& Value, const TCHAR* Expected)
+	/** About one key: points at that key's own line. */
+	void WarnAt(TArray<FString>& Warnings, const FOscuIniSection& Section, const FOscuIniKey& KV, const FString& Message)
 	{
-		Warn(Warnings, Section, FString::Printf(TEXT("%s=%s is not %s; keeping the Project Settings value."), *Key, *Value, Expected));
+		Warnings.Add(FString::Printf(TEXT("line %d [%s]: %s"), KV.Line, *Section.Name, *Message));
+	}
+
+	void WarnBadValue(TArray<FString>& Warnings, const FOscuIniSection& Section, const FOscuIniKey& KV, const TCHAR* Expected)
+	{
+		WarnAt(Warnings, Section, KV, FString::Printf(TEXT("%s=%s is not %s; keeping the Project Settings value."), *KV.Key, *KV.Value, Expected));
 	}
 
 	bool ReadBool(const FString& Value, bool& Out)
@@ -60,52 +68,52 @@ namespace
 		return Parts;
 	}
 
-	void ReadBoolKey(const FOscuIniSection& Section, const FString& Key, const FString& Value, bool& Field, TArray<FString>& Warnings)
+	void ReadBoolKey(const FOscuIniSection& Section, const FOscuIniKey& KV, bool& Field, TArray<FString>& Warnings)
 	{
-		if (!ReadBool(Value, Field))
+		if (!ReadBool(KV.Value, Field))
 		{
-			WarnBadValue(Warnings, Section, Key, Value, TEXT("True or False"));
+			WarnBadValue(Warnings, Section, KV, TEXT("True or False"));
 		}
 	}
 
-	void ReadPortKey(const FOscuIniSection& Section, const FString& Key, const FString& Value, int32& Field, TArray<FString>& Warnings)
+	void ReadPortKey(const FOscuIniSection& Section, const FOscuIniKey& KV, int32& Field, TArray<FString>& Warnings)
 	{
-		if (!ReadInt(Value, 1, 65535, Field))
+		if (!ReadInt(KV.Value, 1, 65535, Field))
 		{
-			WarnBadValue(Warnings, Section, Key, Value, TEXT("a port from 1 to 65535"));
+			WarnBadValue(Warnings, Section, KV, TEXT("a port from 1 to 65535"));
 		}
 	}
 
-	void WarnUnknownKey(const FOscuIniSection& Section, const FString& Key, TArray<FString>& Warnings)
+	void WarnUnknownKey(const FOscuIniSection& Section, const FOscuIniKey& KV, TArray<FString>& Warnings)
 	{
-		Warn(Warnings, Section, FString::Printf(TEXT("unknown key '%s' ignored."), *Key));
+		WarnAt(Warnings, Section, KV, FString::Printf(TEXT("unknown key '%s' ignored."), *KV.Key));
 	}
 
 	void ApplyOSCTarget(const FOscuIniSection& Section, FOscuOSCTarget& Target, TArray<FString>& Warnings)
 	{
-		for (const TPair<FString, FString>& KV : Section.Keys)
+		for (const FOscuIniKey& KV : Section.Keys)
 		{
 			if (KV.Key == TEXT("Host"))         { Target.Host = KV.Value; }
-			else if (KV.Key == TEXT("Port"))    { ReadPortKey(Section, KV.Key, KV.Value, Target.Port, Warnings); }
-			else if (KV.Key == TEXT("Enabled")) { ReadBoolKey(Section, KV.Key, KV.Value, Target.bEnabled, Warnings); }
-			else                                { WarnUnknownKey(Section, KV.Key, Warnings); }
+			else if (KV.Key == TEXT("Port"))    { ReadPortKey(Section, KV, Target.Port, Warnings); }
+			else if (KV.Key == TEXT("Enabled")) { ReadBoolKey(Section, KV, Target.bEnabled, Warnings); }
+			else                                { WarnUnknownKey(Section, KV, Warnings); }
 		}
 	}
 
 	void ApplyMIDIInDevice(const FOscuIniSection& Section, FOscuMIDIInputDevice& Device, TArray<FString>& Warnings)
 	{
 		FOscuMIDIInputMessages& L = Device.ListenFor;
-		for (const TPair<FString, FString>& KV : Section.Keys)
+		for (const FOscuIniKey& KV : Section.Keys)
 		{
 			const FString& Key = KV.Key;
-			if (Key == TEXT("Notes"))              { ReadBoolKey(Section, Key, KV.Value, L.bNotes, Warnings); }
-			else if (Key == TEXT("ControlChange")) { ReadBoolKey(Section, Key, KV.Value, L.bControlChange, Warnings); }
-			else if (Key == TEXT("ProgramChange")) { ReadBoolKey(Section, Key, KV.Value, L.bProgramChange, Warnings); }
-			else if (Key == TEXT("PitchBend"))     { ReadBoolKey(Section, Key, KV.Value, L.bPitchBend, Warnings); }
-			else if (Key == TEXT("Aftertouch"))    { ReadBoolKey(Section, Key, KV.Value, L.bAftertouch, Warnings); }
-			else if (Key == TEXT("Clock"))         { ReadBoolKey(Section, Key, KV.Value, L.bClock, Warnings); }
-			else if (Key == TEXT("Transport"))     { ReadBoolKey(Section, Key, KV.Value, L.bTransport, Warnings); }
-			else if (Key == TEXT("SysEx"))         { ReadBoolKey(Section, Key, KV.Value, L.bSysEx, Warnings); }
+			if (Key == TEXT("Notes"))              { ReadBoolKey(Section, KV, L.bNotes, Warnings); }
+			else if (Key == TEXT("ControlChange")) { ReadBoolKey(Section, KV, L.bControlChange, Warnings); }
+			else if (Key == TEXT("ProgramChange")) { ReadBoolKey(Section, KV, L.bProgramChange, Warnings); }
+			else if (Key == TEXT("PitchBend"))     { ReadBoolKey(Section, KV, L.bPitchBend, Warnings); }
+			else if (Key == TEXT("Aftertouch"))    { ReadBoolKey(Section, KV, L.bAftertouch, Warnings); }
+			else if (Key == TEXT("Clock"))         { ReadBoolKey(Section, KV, L.bClock, Warnings); }
+			else if (Key == TEXT("Transport"))     { ReadBoolKey(Section, KV, L.bTransport, Warnings); }
+			else if (Key == TEXT("SysEx"))         { ReadBoolKey(Section, KV, L.bSysEx, Warnings); }
 			else if (Key == TEXT("IgnoredChannels"))
 			{
 				TArray<int32> Channels;
@@ -118,25 +126,27 @@ namespace
 					}
 					else
 					{
-						Warn(Warnings, Section, FString::Printf(TEXT("IgnoredChannels entry '%s' is not a channel from 1 to 16; skipped."), *Entry));
+						WarnAt(Warnings, Section, KV, FString::Printf(TEXT("IgnoredChannels entry '%s' is not a channel from 1 to 16; skipped."), *Entry));
 					}
 				}
 				Device.IgnoredChannels = MoveTemp(Channels);
 			}
-			else { WarnUnknownKey(Section, Key, Warnings); }
+			else { WarnUnknownKey(Section, KV, Warnings); }
 		}
 	}
 
-	/** "Section|Key" -> value, plus the section names, for Diff. */
-	void Flatten(const FString& Text, TMap<FString, FString>& OutValues, TArray<FString>& OutSections)
+	/** "Section|Key" -> value, plus the section names and the keys in file order, for Diff. */
+	void Flatten(const FString& Text, TMap<FString, FString>& OutValues, TArray<FString>& OutSections, TArray<FString>& OutKeyOrder)
 	{
 		TArray<FString> Ignored;
 		for (const FOscuIniSection& Section : OscuEndpointFile::Parse(Text, Ignored))
 		{
 			OutSections.AddUnique(Section.Name);
-			for (const TPair<FString, FString>& KV : Section.Keys)
+			for (const FOscuIniKey& KV : Section.Keys)
 			{
-				OutValues.Add(Section.Name + TEXT("|") + KV.Key, KV.Value);
+				const FString FlatKey = Section.Name + TEXT("|") + KV.Key;
+				OutValues.Add(FlatKey, KV.Value);
+				OutKeyOrder.AddUnique(FlatKey);
 			}
 		}
 	}
@@ -183,7 +193,10 @@ TArray<FOscuIniSection> OscuEndpointFile::Parse(const FString& Text, TArray<FStr
 			OutWarnings.Add(FString::Printf(TEXT("line %d: '%s' is outside any [section]; ignored."), LineNumber, *Line));
 			continue;
 		}
-		Sections.Last().Keys.Emplace(Line.Left(Equals).TrimEnd(), Line.Mid(Equals + 1).TrimStart());
+		FOscuIniKey& KV = Sections.Last().Keys.AddDefaulted_GetRef();
+		KV.Key = Line.Left(Equals).TrimEnd();
+		KV.Value = Line.Mid(Equals + 1).TrimStart();
+		KV.Line = LineNumber;
 	}
 
 	return Sections;
@@ -213,10 +226,28 @@ FString OscuEndpointFile::Write(const UOscuSettings& S)
 	L(TEXT("[OSC Out]"));
 	L(FString::Printf(TEXT("Enabled=%s"), B(S.bEnableOSCOut)));
 
-	for (const FOscuOSCTarget& Target : S.OSCTargets)
+	// A section header is the only place a name lives, so an entry with no name, or a
+	// name an earlier entry already took, cannot be written without losing or merging it.
+	// Compared trimmed and case-insensitively, the way Apply reads the names back.
+	TArray<FString> WrittenTargets;
+	for (int32 Index = 0; Index < S.OSCTargets.Num(); ++Index)
 	{
+		const FOscuOSCTarget& Target = S.OSCTargets[Index];
+		const FString Name = Target.Name.IsNone() ? FString() : Target.Name.ToString().TrimStartAndEnd();
+		if (Name.IsEmpty())
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: OSC target #%d not written: its name is blank."), Index);
+			continue;
+		}
+		if (WrittenTargets.Contains(Name))
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: OSC target #%d '%s' not written: its name repeats an earlier target."), Index, *Name);
+			continue;
+		}
+		WrittenTargets.Add(Name);
+
 		L(TEXT(""));
-		L(FString::Printf(TEXT("[%s%s]"), OSCTargetPrefix, *Target.Name.ToString()));
+		L(FString::Printf(TEXT("[%s%s]"), OSCTargetPrefix, *Name));
 		L(FString::Printf(TEXT("Host=%s"), *Target.Host));
 		L(FString::Printf(TEXT("Port=%d"), Target.Port));
 		L(FString::Printf(TEXT("Enabled=%s"), B(Target.bEnabled)));
@@ -226,11 +257,26 @@ FString OscuEndpointFile::Write(const UOscuSettings& S)
 	L(TEXT("[MIDI In]"));
 	L(FString::Printf(TEXT("Enabled=%s"), B(S.bEnableMIDIIn)));
 
-	for (const FOscuMIDIInputDevice& Device : S.MIDIInputDevices)
+	TArray<FString> WrittenDevices;
+	for (int32 Index = 0; Index < S.MIDIInputDevices.Num(); ++Index)
 	{
+		const FOscuMIDIInputDevice& Device = S.MIDIInputDevices[Index];
+		const FString Name = Device.Name.TrimStartAndEnd();
+		if (Name.IsEmpty())
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: MIDI In device #%d not written: its name is blank."), Index);
+			continue;
+		}
+		if (WrittenDevices.Contains(Name))
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: MIDI In device #%d '%s' not written: its name repeats an earlier device."), Index, *Name);
+			continue;
+		}
+		WrittenDevices.Add(Name);
+
 		const FOscuMIDIInputMessages& M = Device.ListenFor;
 		L(TEXT(""));
-		L(FString::Printf(TEXT("[%s%s]"), MIDIInDevicePrefix, *Device.Name));
+		L(FString::Printf(TEXT("[%s%s]"), MIDIInDevicePrefix, *Name));
 		L(FString::Printf(TEXT("Notes=%s"), B(M.bNotes)));
 		L(FString::Printf(TEXT("ControlChange=%s"), B(M.bControlChange)));
 		L(FString::Printf(TEXT("ProgramChange=%s"), B(M.bProgramChange)));
@@ -263,6 +309,14 @@ FString OscuEndpointFile::Write(const UOscuSettings& S)
 
 TArray<FString> OscuEndpointFile::Apply(const FString& Text, UOscuSettings& S, TArray<FString>& OutWarnings)
 {
+	const TArray<FOscuIniSection> Sections = Parse(Text, OutWarnings);
+	if (Sections.Num() == 0)
+	{
+		// Empty or cut short: applying it would empty the target and device lists.
+		OutWarnings.Add(TEXT("OSCulator.ini has no [sections]; ignored, Project Settings kept."));
+		return {};
+	}
+
 	const FString Before = Write(S);
 
 	// Sections are the list: rebuilt in file order, each starting from the existing
@@ -271,7 +325,7 @@ TArray<FString> OscuEndpointFile::Apply(const FString& Text, UOscuSettings& S, T
 	TArray<FOscuMIDIInputDevice> Devices;
 	TSet<FString> SeenSections;
 
-	for (const FOscuIniSection& Section : Parse(Text, OutWarnings))
+	for (const FOscuIniSection& Section : Sections)
 	{
 		bool bAlreadyInSet = false;
 		SeenSections.Add(Section.Name, &bAlreadyInSet);
@@ -282,51 +336,52 @@ TArray<FString> OscuEndpointFile::Apply(const FString& Text, UOscuSettings& S, T
 
 		if (Section.Name == TEXT("OSC In"))
 		{
-			for (const TPair<FString, FString>& KV : Section.Keys)
+			for (const FOscuIniKey& KV : Section.Keys)
 			{
-				if (KV.Key == TEXT("Enabled"))               { ReadBoolKey(Section, KV.Key, KV.Value, S.bEnableOSCIn, OutWarnings); }
+				if (KV.Key == TEXT("Enabled"))               { ReadBoolKey(Section, KV, S.bEnableOSCIn, OutWarnings); }
 				else if (KV.Key == TEXT("BindAddress"))      { S.BindAddress = KV.Value; }
-				else if (KV.Key == TEXT("ListenPort"))       { ReadPortKey(Section, KV.Key, KV.Value, S.ListenPort, OutWarnings); }
+				else if (KV.Key == TEXT("ListenPort"))       { ReadPortKey(Section, KV, S.ListenPort, OutWarnings); }
 				else if (KV.Key == TEXT("AllowedSenderIPs")) { S.AllowedSenderIPs = ReadList(KV.Value); }
-				else                                         { WarnUnknownKey(Section, KV.Key, OutWarnings); }
+				else                                         { WarnUnknownKey(Section, KV, OutWarnings); }
 			}
 		}
 		else if (Section.Name == TEXT("OSC Out"))
 		{
-			for (const TPair<FString, FString>& KV : Section.Keys)
+			for (const FOscuIniKey& KV : Section.Keys)
 			{
-				if (KV.Key == TEXT("Enabled")) { ReadBoolKey(Section, KV.Key, KV.Value, S.bEnableOSCOut, OutWarnings); }
-				else                           { WarnUnknownKey(Section, KV.Key, OutWarnings); }
+				if (KV.Key == TEXT("Enabled")) { ReadBoolKey(Section, KV, S.bEnableOSCOut, OutWarnings); }
+				else                           { WarnUnknownKey(Section, KV, OutWarnings); }
 			}
 		}
 		else if (Section.Name == TEXT("MIDI In"))
 		{
-			for (const TPair<FString, FString>& KV : Section.Keys)
+			for (const FOscuIniKey& KV : Section.Keys)
 			{
-				if (KV.Key == TEXT("Enabled")) { ReadBoolKey(Section, KV.Key, KV.Value, S.bEnableMIDIIn, OutWarnings); }
-				else                           { WarnUnknownKey(Section, KV.Key, OutWarnings); }
+				if (KV.Key == TEXT("Enabled")) { ReadBoolKey(Section, KV, S.bEnableMIDIIn, OutWarnings); }
+				else                           { WarnUnknownKey(Section, KV, OutWarnings); }
 			}
 		}
 		else if (Section.Name == TEXT("MIDI Out"))
 		{
-			for (const TPair<FString, FString>& KV : Section.Keys)
+			for (const FOscuIniKey& KV : Section.Keys)
 			{
-				if (KV.Key == TEXT("Enabled"))      { ReadBoolKey(Section, KV.Key, KV.Value, S.bEnableMIDIOut, OutWarnings); }
+				if (KV.Key == TEXT("Enabled"))      { ReadBoolKey(Section, KV, S.bEnableMIDIOut, OutWarnings); }
 				else if (KV.Key == TEXT("Devices")) { S.MIDIOutputDeviceNames = ReadList(KV.Value); }
-				else                                { WarnUnknownKey(Section, KV.Key, OutWarnings); }
+				else                                { WarnUnknownKey(Section, KV, OutWarnings); }
 			}
 		}
 		else if (Section.Name == TEXT("Performance"))
 		{
-			for (const TPair<FString, FString>& KV : Section.Keys)
+			for (const FOscuIniKey& KV : Section.Keys)
 			{
-				if (KV.Key == TEXT("PerformanceMode")) { ReadBoolKey(Section, KV.Key, KV.Value, S.bPerformanceMode, OutWarnings); }
-				else                                   { WarnUnknownKey(Section, KV.Key, OutWarnings); }
+				if (KV.Key == TEXT("PerformanceMode")) { ReadBoolKey(Section, KV, S.bPerformanceMode, OutWarnings); }
+				else                                   { WarnUnknownKey(Section, KV, OutWarnings); }
 			}
 		}
 		else if (Section.Name.StartsWith(OSCTargetPrefix))
 		{
 			const FName Name(*Section.Name.Mid(FCString::Strlen(OSCTargetPrefix)).TrimStartAndEnd());
+			// FName == here, like FString == for devices below, ignores case on purpose: [osc target totd] is toTD.
 			auto SameName = [Name](const FOscuOSCTarget& T) { return T.Name == Name; };
 
 			FOscuOSCTarget* Target = Targets.FindByPredicate(SameName);
@@ -367,9 +422,9 @@ TArray<FString> OscuEndpointFile::Apply(const FString& Text, UOscuSettings& S, T
 TArray<FString> OscuEndpointFile::Diff(const FString& BeforeText, const FString& AfterText)
 {
 	TMap<FString, FString> Before, After;
-	TArray<FString> BeforeSections, AfterSections;
-	Flatten(BeforeText, Before, BeforeSections);
-	Flatten(AfterText, After, AfterSections);
+	TArray<FString> BeforeSections, AfterSections, BeforeOrder, AfterOrder;
+	Flatten(BeforeText, Before, BeforeSections, BeforeOrder);
+	Flatten(AfterText, After, AfterSections, AfterOrder);
 
 	TArray<FString> Lines;
 	for (const FString& Section : BeforeSections)
@@ -386,14 +441,16 @@ TArray<FString> OscuEndpointFile::Diff(const FString& BeforeText, const FString&
 			Lines.Add(FString::Printf(TEXT("[%s] added"), *Section));
 		}
 	}
-	for (const TPair<FString, FString>& Pair : After)
+	// Walk the keys in file order: TMap order is not something to rely on.
+	for (const FString& FlatKey : AfterOrder)
 	{
-		const FString* Old = Before.Find(Pair.Key);
-		if (Old != nullptr && !Old->Equals(Pair.Value, ESearchCase::CaseSensitive))
+		const FString& New = After.FindChecked(FlatKey);
+		const FString* Old = Before.Find(FlatKey);
+		if (Old != nullptr && !Old->Equals(New, ESearchCase::CaseSensitive))
 		{
 			FString Section, Key;
-			Pair.Key.Split(TEXT("|"), &Section, &Key);
-			Lines.Add(FString::Printf(TEXT("[%s] %s: %s -> %s"), *Section, *Key, **Old, *Pair.Value));
+			FlatKey.Split(TEXT("|"), &Section, &Key);
+			Lines.Add(FString::Printf(TEXT("[%s] %s: %s -> %s"), *Section, *Key, **Old, *New));
 		}
 	}
 	return Lines;

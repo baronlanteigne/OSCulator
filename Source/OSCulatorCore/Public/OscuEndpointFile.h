@@ -6,12 +6,20 @@
 
 class UOscuSettings;
 
+/** One Key=Value line of OSCulator.ini, with the line it came from for warnings. */
+struct FOscuIniKey
+{
+	FString Key;
+	FString Value;
+	int32 Line = 0;
+};
+
 /** One [section] of OSCulator.ini, keys in file order. */
 struct FOscuIniSection
 {
 	FString Name;
 	int32 Line = 0;
-	TArray<TPair<FString, FString>> Keys;
+	TArray<FOscuIniKey> Keys;
 };
 
 /**
@@ -25,13 +33,18 @@ namespace OscuEndpointFile
 	/** Splits text into sections. Anything it cannot read becomes a warning, never an error. */
 	OSCULATORCORE_API TArray<FOscuIniSection> Parse(const FString& Text, TArray<FString>& OutWarnings);
 
-	/** The endpoint fields of Settings in OSCulator.ini form, comments included. */
+	/**
+	 * The endpoint fields of Settings in OSCulator.ini form, comments included. Targets
+	 * and devices with a blank or repeated name are left out (a section cannot hold
+	 * them), each with a LogOSCulator warning.
+	 */
 	OSCULATORCORE_API FString Write(const UOscuSettings& Settings);
 
 	/**
 	 * Applies Text over Settings. Present lines win, missing lines keep the settings
 	 * value, and [OSC Target] / [MIDI In <device>] sections replace those lists.
-	 * Returns one human-readable line per value that changed.
+	 * A file with no sections at all (empty, truncated) is ignored with one warning.
+	 * Returns one human-readable line per value that changed, in file order.
 	 */
 	OSCULATORCORE_API TArray<FString> Apply(const FString& Text, UOscuSettings& Settings, TArray<FString>& OutWarnings);
 

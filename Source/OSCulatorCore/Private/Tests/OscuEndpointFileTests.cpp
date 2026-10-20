@@ -229,4 +229,127 @@ bool FOscuEndpointUnknownTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+//////////////////////////////////////////////////////////////////////////
+// An empty or truncated file wipes nothing
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointEmptyFileTest,
+	"OSCulator.EndpointFile.EmptyFileKeepsSettings",
+	OscuTest::Flags)
+
+bool FOscuEndpointEmptyFileTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuEndpointFileTest;
+
+	UOscuSettings* S = MakeSettings();
+	TArray<FString> Warnings;
+	const TArray<FString> Overrides = OscuEndpointFile::Apply(TEXT(""), *S, Warnings);
+
+	TestEqual(TEXT("Targets kept"), S->OSCTargets.Num(), 2);
+	TestEqual(TEXT("MIDI In devices kept"), S->MIDIInputDevices.Num(), 1);
+	TestEqual(TEXT("One warning"), Warnings.Num(), 1);
+	TestEqual(TEXT("Nothing overridden"), Overrides.Num(), 0);
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Entries the file cannot name are left out of it, loudly
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointBlankAndDuplicateNamesTest,
+	"OSCulator.EndpointFile.BlankAndDuplicateNamesSkipped",
+	OscuTest::Flags)
+
+bool FOscuEndpointBlankAndDuplicateNamesTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuEndpointFileTest;
+
+	UOscuSettings* S = MakeSettings();
+	FOscuOSCTarget Duplicate;
+	Duplicate.Name = FName(TEXT("toTD"));
+	Duplicate.Port = 9100;
+	S->OSCTargets.Add(Duplicate);
+	S->OSCTargets.Add(FOscuOSCTarget()); // Name is None
+	FOscuMIDIInputDevice Blank;
+	Blank.Name = TEXT("");
+	S->MIDIInputDevices.Add(Blank);
+
+	AddExpectedMessagePlain(TEXT("repeats an earlier"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	AddExpectedMessagePlain(TEXT("name is blank"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+	const FString Text = OscuEndpointFile::Write(*S);
+
+	const FString TDHeader = TEXT("[OSC Target toTD]");
+	const int32 First = Text.Find(TDHeader);
+	TestTrue(TEXT("toTD written once"), First != INDEX_NONE
+		&& Text.Find(TDHeader, ESearchCase::IgnoreCase, ESearchDir::FromStart, First + TDHeader.Len()) == INDEX_NONE);
+	TestFalse(TEXT("No None target"), Text.Contains(TEXT("[OSC Target None]")));
+	TestFalse(TEXT("No blank device"), Text.Contains(TEXT("[MIDI In ]")));
+
+	TArray<FString> Warnings;
+	OscuEndpointFile::Apply(Text, *MakeSettings(), Warnings);
+	TestEqual(TEXT("The written file reads back without warnings"), Warnings.Num(), 0);
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Warnings point at the offending line, not its section header
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointKeyLineTest,
+	"OSCulator.EndpointFile.WarningNamesKeyLine",
+	OscuTest::Flags)
+
+bool FOscuEndpointKeyLineTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuEndpointFileTest;
+
+	UOscuSettings* S = MakeSettings();
+	const FString Text = OscuEndpointFile::Write(*S).Replace(TEXT("Port=8008"), TEXT("Port=abc"));
+
+	TArray<FString> Lines;
+	Text.ParseIntoArrayLines(Lines, /*InCullEmpty*/ false);
+	const int32 BadLine = Lines.IndexOfByKey(FString(TEXT("Port=abc"))) + 1;
+
+	TArray<FString> Warnings;
+	OscuEndpointFile::Apply(Text, *S, Warnings);
+
+	TestEqual(TEXT("One warning"), Warnings.Num(), 1);
+	if (Warnings.Num() == 1)
+	{
+		const FString Expected = FString::Printf(TEXT("line %d [OSC Target toTD]"), BadLine);
+		TestTrue(FString::Printf(TEXT("'%s' starts with '%s'"), *Warnings[0], *Expected), Warnings[0].StartsWith(Expected));
+	}
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Changes are reported in file order
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointDiffOrderTest,
+	"OSCulator.EndpointFile.DiffInFileOrder",
+	OscuTest::Flags)
+
+bool FOscuEndpointDiffOrderTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuEndpointFileTest;
+
+	UOscuSettings* S = MakeSettings();
+	const FString Text = OscuEndpointFile::Write(*S)
+		.Replace(TEXT("PerformanceMode=False"), TEXT("PerformanceMode=True"))
+		.Replace(TEXT("Port=8008"), TEXT("Port=8010"))
+		.Replace(TEXT("ListenPort=8000"), TEXT("ListenPort=8001"));
+
+	TArray<FString> Warnings;
+	const TArray<FString> Overrides = OscuEndpointFile::Apply(Text, *S, Warnings);
+
+	const TArray<FString> Expected = {
+		TEXT("[OSC In] ListenPort: 8000 -> 8001"),
+		TEXT("[OSC Target toTD] Port: 8008 -> 8010"),
+		TEXT("[Performance] PerformanceMode: False -> True"),
+	};
+	TestEqual(TEXT("Overrides in file order"), FString::Join(Overrides, TEXT(" | ")), FString::Join(Expected, TEXT(" | ")));
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
