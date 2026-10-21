@@ -367,11 +367,15 @@ bool FOscuEndpointLoadOrCreateTest::RunTest(const FString& Parameters)
 	const FString Path = TempPath();
 	IFileManager::Get().Delete(*Path, /*RequireExists*/ false, /*EvenReadOnly*/ true);
 
+	const FString StatusBefore = OscuEndpointFile::DescribeLastLoad();
+
 	UOscuSettings* S = MakeSettings();
 	TArray<FString> Overrides;
 	bool bCreated = false;
-	TestTrue(TEXT("Missing file handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated));
+	FString Status;
+	TestTrue(TEXT("Missing file handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated, Status));
 	TestTrue(TEXT("It was created"), bCreated);
+	TestTrue(TEXT("Status says created"), Status.Contains(TEXT("created")));
 
 	FString OnDisk;
 	TestTrue(TEXT("File exists"), FFileHelper::LoadFileToString(OnDisk, *Path));
@@ -379,12 +383,52 @@ bool FOscuEndpointLoadOrCreateTest::RunTest(const FString& Parameters)
 
 	// Second pass: the file now exists and differs from the settings.
 	FFileHelper::SaveStringToFile(OnDisk.Replace(TEXT("ListenPort=8000"), TEXT("ListenPort=8100")), *Path);
-	TestTrue(TEXT("Existing file handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated));
+	TestTrue(TEXT("Existing file handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated, Status));
 	TestFalse(TEXT("Not re-created"), bCreated);
 	TestEqual(TEXT("Applied"), S->ListenPort, 8100);
 	TestEqual(TEXT("One override"), Overrides.Num(), 1);
+	TestTrue(TEXT("Status counts the override"), Status.Contains(TEXT("1 override(s)")));
+
+	TestEqual(TEXT("The startup status is left alone"), OscuEndpointFile::DescribeLastLoad(), StatusBefore);
 
 	IFileManager::Get().Delete(*Path, false, true);
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// A save cut short between delete and move leaves only the .tmp: it is recovered
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointRecoverTempTest,
+	"OSCulator.EndpointFile.RecoverInterruptedSave",
+	OscuTest::Flags)
+
+bool FOscuEndpointRecoverTempTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuEndpointFileTest;
+
+	const FString Path = TempPath();
+	const FString Temp = Path + TEXT(".tmp");
+	IFileManager::Get().Delete(*Path, false, true);
+	IFileManager::Get().Delete(*Temp, false, true);
+
+	UOscuSettings* S = MakeSettings();
+	const FString Text = OscuEndpointFile::Write(*S).Replace(TEXT("ListenPort=8000"), TEXT("ListenPort=8100"));
+	TestTrue(TEXT("Only the .tmp is written"), FFileHelper::SaveStringToFile(Text, *Temp));
+
+	AddExpectedMessagePlain(TEXT("recovered OSCulator.ini from an interrupted save"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+
+	TArray<FString> Overrides;
+	bool bCreated = true;
+	FString Status;
+	TestTrue(TEXT("Handled"), OscuEndpointFile::LoadOrCreate(*S, Path, Overrides, bCreated, Status));
+	TestFalse(TEXT("Not created from the settings"), bCreated);
+	TestTrue(TEXT("File is back"), FPaths::FileExists(Path));
+	TestFalse(TEXT(".tmp is gone"), FPaths::FileExists(Temp));
+	TestEqual(TEXT("The .tmp values were applied"), S->ListenPort, 8100);
+
+	IFileManager::Get().Delete(*Path, false, true);
+	IFileManager::Get().Delete(*Temp, false, true);
 	return true;
 }
 

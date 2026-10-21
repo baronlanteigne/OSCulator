@@ -63,9 +63,12 @@ namespace OscuEndpointFile
 
 	/**
 	 * Missing file: written from Settings (bOutCreated). Present: applied over Settings,
-	 * changes in OutOverrides, warnings logged. False only if it could not be read or created.
+	 * changes in OutOverrides, warnings logged. Only <Path>.tmp present (a save cut
+	 * short): moved into place, then applied. OutStatus is the one-line summary; the
+	 * caller decides whether it becomes DescribeLastLoad(). False only if the file
+	 * could not be read or created.
 	 */
-	OSCULATORCORE_API bool LoadOrCreate(UOscuSettings& Settings, const FString& Path, TArray<FString>& OutOverrides, bool& bOutCreated);
+	OSCULATORCORE_API bool LoadOrCreate(UOscuSettings& Settings, const FString& Path, TArray<FString>& OutOverrides, bool& bOutCreated, FString& OutStatus);
 
 	/** Called once on the settings CDO, before any transport opens. */
 	void LoadAtStartup(UOscuSettings& Settings);

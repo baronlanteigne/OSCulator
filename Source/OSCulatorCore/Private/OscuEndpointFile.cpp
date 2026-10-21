@@ -14,9 +14,10 @@ namespace
 	const TCHAR* const OSCTargetPrefix = TEXT("OSC Target ");
 	const TCHAR* const MIDIInDevicePrefix = TEXT("MIDI In ");
 
+	// Game thread only: written at startup (and by the reload command), read by OSCulator.Status.
 	FString GLastLoad = TEXT("OSCulator.ini: not loaded.");
 
-	void LogResult(const FString& Path, const TArray<FString>& Overrides, const TArray<FString>& Warnings)
+	FString LogResult(const FString& Path, const TArray<FString>& Overrides, const TArray<FString>& Warnings)
 	{
 		for (const FString& Warning : Warnings)
 		{
@@ -26,9 +27,10 @@ namespace
 		{
 			UE_LOG(LogOSCulator, Log, TEXT("OSCulator.ini overrides %s"), *Override);
 		}
-		GLastLoad = FString::Printf(TEXT("OSCulator.ini: %s -- %d override(s), %d warning(s)."),
+		const FString Status = FString::Printf(TEXT("OSCulator.ini: %s -- %d override(s), %d warning(s)."),
 			*Path, Overrides.Num(), Warnings.Num());
-		UE_LOG(LogOSCulator, Log, TEXT("%s"), *GLastLoad);
+		UE_LOG(LogOSCulator, Log, TEXT("%s"), *Status);
+		return Status;
 	}
 
 	/** About the section as a whole: points at its [header] line. */
@@ -501,46 +503,68 @@ bool OscuEndpointFile::Save(const UOscuSettings& Settings, const FString& Path)
 {
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree*/ true);
 
-	// Write beside it, then swap: a hard reset mid-write must never leave a
-	// truncated OSCulator.ini behind (this machine has Kernel-Power 41 resets).
+	// Written beside it, then moved over it (this machine has Kernel-Power 41 resets).
+	// A reset while writing leaves the old OSCulator.ini untouched; only the .tmp is cut
+	// short. Move(Replace) is not atomic: it deletes the old file, then renames, so a
+	// reset in that gap leaves only the finished .tmp, which LoadOrCreate moves back
+	// into place on the next launch.
 	const FString Temp = Path + TEXT(".tmp");
 	if (!FFileHelper::SaveStringToFile(Write(Settings), *Temp, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		return false;
 	}
-	return IFileManager::Get().Move(*Path, *Temp, /*Replace*/ true, /*EvenIfReadOnly*/ false);
+	if (!IFileManager::Get().Move(*Path, *Temp, /*Replace*/ true, /*EvenIfReadOnly*/ false))
+	{
+		IFileManager::Get().Delete(*Temp, /*RequireExists*/ false, /*EvenReadOnly*/ true);
+		return false;
+	}
+	return true;
 }
 
-bool OscuEndpointFile::LoadOrCreate(UOscuSettings& Settings, const FString& Path, TArray<FString>& OutOverrides, bool& bOutCreated)
+bool OscuEndpointFile::LoadOrCreate(UOscuSettings& Settings, const FString& Path, TArray<FString>& OutOverrides, bool& bOutCreated, FString& OutStatus)
 {
 	OutOverrides.Reset();
 	bOutCreated = false;
+
+	// A save interrupted between Move's delete and rename (see Save) leaves only the .tmp.
+	const FString Temp = Path + TEXT(".tmp");
+	if (!FPaths::FileExists(Path) && FPaths::FileExists(Temp))
+	{
+		if (IFileManager::Get().Move(*Path, *Temp, /*Replace*/ false, /*EvenIfReadOnly*/ false))
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: recovered OSCulator.ini from an interrupted save (%s)."), *Temp);
+		}
+		else
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: found %s from an interrupted save but could not move it into place."), *Temp);
+		}
+	}
 
 	if (!FPaths::FileExists(Path))
 	{
 		if (!Save(Settings, Path))
 		{
-			GLastLoad = FString::Printf(TEXT("OSCulator.ini: %s is missing and could not be created; using Project Settings."), *Path);
-			UE_LOG(LogOSCulator, Warning, TEXT("%s"), *GLastLoad);
+			OutStatus = FString::Printf(TEXT("OSCulator.ini: %s is missing and could not be created; using Project Settings."), *Path);
+			UE_LOG(LogOSCulator, Warning, TEXT("%s"), *OutStatus);
 			return false;
 		}
 		bOutCreated = true;
-		GLastLoad = FString::Printf(TEXT("OSCulator.ini: created %s from Project Settings."), *Path);
-		UE_LOG(LogOSCulator, Log, TEXT("%s"), *GLastLoad);
+		OutStatus = FString::Printf(TEXT("OSCulator.ini: created %s from Project Settings."), *Path);
+		UE_LOG(LogOSCulator, Log, TEXT("%s"), *OutStatus);
 		return true;
 	}
 
 	FString Text;
 	if (!FFileHelper::LoadFileToString(Text, *Path))
 	{
-		GLastLoad = FString::Printf(TEXT("OSCulator.ini: %s could not be read (locked?); using Project Settings."), *Path);
-		UE_LOG(LogOSCulator, Warning, TEXT("%s"), *GLastLoad);
+		OutStatus = FString::Printf(TEXT("OSCulator.ini: %s could not be read (locked?); using Project Settings."), *Path);
+		UE_LOG(LogOSCulator, Warning, TEXT("%s"), *OutStatus);
 		return false;
 	}
 
 	TArray<FString> Warnings;
 	OutOverrides = Apply(Text, Settings, Warnings);
-	LogResult(Path, OutOverrides, Warnings);
+	OutStatus = LogResult(Path, OutOverrides, Warnings);
 	return true;
 }
 
@@ -563,7 +587,7 @@ void OscuEndpointFile::LoadAtStartup(UOscuSettings& Settings)
 
 	TArray<FString> Overrides;
 	bool bCreated = false;
-	LoadOrCreate(Settings, GetPath(), Overrides, bCreated);
+	LoadOrCreate(Settings, GetPath(), Overrides, bCreated, GLastLoad);
 
 	if (Overrides.Num() > 0)
 	{
@@ -573,8 +597,14 @@ void OscuEndpointFile::LoadAtStartup(UOscuSettings& Settings)
 		{
 			if (ShouldSyncDefaultConfig())
 			{
-				GetMutableDefault<UOscuSettings>()->TryUpdateDefaultConfigFile();
-				UE_LOG(LogOSCulator, Log, TEXT("OSCulator.ini values copied into Project Settings (DefaultGame.ini)."));
+				if (GetMutableDefault<UOscuSettings>()->TryUpdateDefaultConfigFile())
+				{
+					UE_LOG(LogOSCulator, Log, TEXT("OSCulator.ini values copied into Project Settings (DefaultGame.ini)."));
+				}
+				else
+				{
+					UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini values are in use, but could not be copied into DefaultGame.ini (read-only, or not checked out?)."));
+				}
 			}
 		});
 	}

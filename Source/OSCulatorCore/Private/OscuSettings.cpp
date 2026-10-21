@@ -5,6 +5,7 @@
 #include "OscuEndpointFile.h"
 
 #if WITH_EDITOR
+#include "Misc/FileHelper.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #endif
@@ -49,9 +50,21 @@ void UOscuSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChange
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 	OnSettingsChanged.Broadcast();
 
-	if (IsTheClassDefault(*this))
+	// Interactive = mid-drag on a spin box: write once, when the value is committed.
+	// Commandlets never write it, matching the load side.
+	if (IsTheClassDefault(*this)
+		&& PropertyChangedEvent.ChangeType != EPropertyChangeType::Interactive
+		&& !IsRunningCommandlet())
 	{
 		const FString Path = OscuEndpointFile::GetPath();
+
+		// Edits to fields the file does not hold (TagPrefix, MIDI maps...) leave it alone.
+		FString OnDisk;
+		if (FFileHelper::LoadFileToString(OnDisk, *Path) && OnDisk.Equals(OscuEndpointFile::Write(*this), ESearchCase::CaseSensitive))
+		{
+			return;
+		}
+
 		if (!OscuEndpointFile::Save(*this, Path))
 		{
 			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator: could not write %s. Is it read-only?"), *Path);
