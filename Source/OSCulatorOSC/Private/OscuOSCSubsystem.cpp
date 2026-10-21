@@ -9,6 +9,8 @@
 #include "OscuSettings.h"
 
 #include "Engine/World.h"
+#include "Misc/ScopeExit.h"
+#include "Templates/UnrealTemplate.h"
 
 // The whole game-thread cost of OSC input for one frame: draining the queue,
 // coalescing, and every dispatch it decided to make.
@@ -70,6 +72,14 @@ bool UOscuOSCSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 
 void UOscuOSCSubsystem::Restart()
 {
+	if (bDraining)
+	{
+		bRestartPending = true;
+		UE_LOG(LogOSCulator, Verbose, TEXT("OSC restart requested mid-dispatch; deferred until the drain finishes."));
+		return;
+	}
+	bRestartPending = false;
+
 	// Only the receiver needs the tick hook; senders are driven by Blueprint calls.
 	if (PreActorTickHandle.IsValid())
 	{
@@ -304,6 +314,8 @@ void UOscuOSCSubsystem::Deinitialize()
 		SettingsChangedHandle.Reset();
 	}
 
+	bRestartPending = false;
+
 	// Joins the receive thread and closes the socket before the world goes away.
 	Receiver.Reset();
 	CloseSenders();
@@ -354,6 +366,18 @@ void UOscuOSCSubsystem::HandleWorldPreActorTick(UWorld* TickingWorld, ELevelTick
 
 void UOscuOSCSubsystem::Drain()
 {
+	// Declared first so it runs last, after the guard has put bDraining back: a Restart
+	// asked for by a dispatched function runs once the whole batch is done.
+	ON_SCOPE_EXIT
+	{
+		if (!bDraining && bRestartPending)
+		{
+			bRestartPending = false;
+			Restart();
+		}
+	};
+	TGuardValue<bool> DrainingGuard(bDraining, true);
+
 	if (!Receiver.IsValid())
 	{
 		return;

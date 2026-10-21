@@ -105,6 +105,8 @@ bool FOscuEndpointReloadTest::RunTest(const FString& Parameters)
 {
 	using namespace OscuTest;
 
+	// ReloadFrom broadcasts OnSettingsChanged, so this also restarts the real MIDI
+	// subsystem (closes and reopens the configured devices), twice with the restore.
 	UOscuSettings* Settings = GetMutableDefault<UOscuSettings>();
 	const FString Saved = OscuEndpointFile::Write(*Settings);
 	const FString Path = FPaths::ConvertRelativePathToFull(
@@ -127,10 +129,16 @@ bool FOscuEndpointReloadTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	const int32 NewPort = 47123;
+	// Never the port already in use, or the test would pass without reloading anything.
+	const int32 NewPort = Settings->ListenPort == 47123 ? 47124 : 47123;
+	const FString NewPortLine = FString::Printf(TEXT("ListenPort=%d"), NewPort);
 	const FString Text = OscuEndpointFile::Write(*Settings)
-		.Replace(*FString::Printf(TEXT("ListenPort=%d"), Settings->ListenPort), *FString::Printf(TEXT("ListenPort=%d"), NewPort));
-	FFileHelper::SaveStringToFile(Text, *Path);
+		.Replace(*FString::Printf(TEXT("ListenPort=%d"), Settings->ListenPort), *NewPortLine);
+	if (!TestTrue(TEXT("The file asks for the new port"), Text.Contains(NewPortLine))
+		|| !TestTrue(TEXT("The test file was written"), FFileHelper::SaveStringToFile(Text, *Path)))
+	{
+		return false;
+	}
 
 	TestTrue(TEXT("Reload succeeded"), OscuEndpointFile::ReloadFrom(Path, /*bSyncDefaultConfig*/ false));
 	TestTrue(TEXT("Still listening"), OSC->IsListening());

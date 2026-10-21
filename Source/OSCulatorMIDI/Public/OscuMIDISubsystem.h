@@ -68,8 +68,18 @@ public:
 
 	static UOscuMIDISubsystem* Get();
 
-	/** Closes whatever is open, then re-reads settings and opens again. */
+	/**
+	 * Closes whatever is open, then re-reads settings and opens again.
+	 *
+	 * Called from inside a dispatch (a mapped Blueprint reloading OSCulator.ini, say),
+	 * it is deferred until the drain or ingest that made the call has finished: closing
+	 * the ports under DrainPorts would free the stream it is still reading.
+	 */
 	void Restart();
+
+	/** Restarts that actually ran (deferred ones count once they run). For tests. */
+	uint32 GetRestartCount() const { return RestartCount; }
+	bool IsRestartPending() const { return bRestartPending; }
 
 	bool IsOpen() const { return Ports.Num() > 0; }
 	int32 GetOpenDeviceCount() const { return Ports.Num(); }
@@ -169,6 +179,14 @@ private:
 
 	/** Reads every open port and ingests what it finds. Called from Tick. */
 	void DrainPorts();
+
+	/** Runs a Restart that was requested mid-dispatch, once the outermost drain or ingest is done. */
+	void RunDeferredRestart();
+
+	/** True while DrainPorts or IngestMessage is on the stack. */
+	bool bDraining = false;
+	bool bRestartPending = false;
+	uint32 RestartCount = 0;
 
 	/** The playing world, or null when only the editor is up. */
 	UWorld* FindDispatchWorld() const;

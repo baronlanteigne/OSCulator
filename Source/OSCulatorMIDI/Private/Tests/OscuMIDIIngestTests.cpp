@@ -562,4 +562,60 @@ bool FOscuMIDIMultipleMapsTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+//////////////////////////////////////////////////////////////////////////
+// A Restart asked for from inside a mapped function waits for the ingest
+//
+// The crash this guards: a mapped Blueprint reloads OSCulator.ini, OnSettingsChanged
+// restarts this subsystem, CloseDevices frees the port DrainPorts is still reading.
+// DrainPorts needs hardware; IngestMessage is the same guard on the path every port
+// message takes, so it is what is tested here.
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuMIDIRestartDeferredTest,
+	"OSCulator.MIDI.RestartDuringIngestIsDeferred",
+	OscuTest::Flags)
+
+bool FOscuMIDIRestartDeferredTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuMIDITest;
+
+	UOscuMIDISubsystem* MIDI = UOscuMIDISubsystem::Get();
+	if (!TestNotNull(TEXT("The MIDI engine subsystem exists"), MIDI))
+	{
+		return false;
+	}
+
+	FScopedTestWorld Scope;
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	Scope.BeginPlay();
+
+	UOscuMIDIMap* Map = MakeMap({ Bind(TEXT("laser"), TEXT("RunHook"), { NoteOn(1, TEXT("60")) }) });
+	FScopedActiveMap ActiveMap(Map);
+
+	// Restarts the real MIDI subsystem (and the OSC one of the test world), as a reload would.
+	const uint32 Before = MIDI->GetRestartCount();
+	uint32 DuringHook = 0;
+	bool bPendingDuringHook = false;
+	Laser->Hook = [&]()
+	{
+		UOscuSettings::OnSettingsChanged.Broadcast();
+		DuringHook = MIDI->GetRestartCount();
+		bPendingDuringHook = MIDI->IsRestartPending();
+	};
+
+	const int32 Calls = MIDI->IngestNote(1, 60, 127, /*bNoteOn*/ true);
+
+	TestEqual(TEXT("The hook was dispatched"), Calls, 1);
+	TestEqual(TEXT("During the ingest: no restart yet"), DuringHook, Before);
+	TestTrue(TEXT("During the ingest: a restart is pending"), bPendingDuringHook);
+	TestEqual(TEXT("After the ingest: the deferred restart ran once"), MIDI->GetRestartCount(), Before + 1);
+	TestFalse(TEXT("After the ingest: nothing left pending"), MIDI->IsRestartPending());
+
+	// Not dispatching: a restart is immediate, as Reload and the settings panel rely on.
+	UOscuSettings::OnSettingsChanged.Broadcast();
+	TestEqual(TEXT("Outside a dispatch: restart runs at once"), MIDI->GetRestartCount(), Before + 2);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

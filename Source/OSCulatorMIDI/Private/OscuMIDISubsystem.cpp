@@ -20,6 +20,8 @@
 #endif
 #include "Misc/App.h"
 #include "Misc/CoreDelegates.h"
+#include "Misc/ScopeExit.h"
+#include "Templates/UnrealTemplate.h"
 
 void UOscuMIDISubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -76,6 +78,9 @@ void UOscuMIDISubsystem::Deinitialize()
 		TickerHandle.Reset();
 	}
 
+	// A restart still waiting on a drain must not reopen devices after this.
+	bRestartPending = false;
+
 	// Release everything before the devices close, or the hardware keeps sounding
 	// with nothing left to tell it otherwise.
 	FlushPendingNoteOffs();
@@ -102,6 +107,15 @@ void UOscuMIDISubsystem::SetActiveMap(UOscuMIDIMap* Map)
 
 void UOscuMIDISubsystem::Restart()
 {
+	if (bDraining)
+	{
+		bRestartPending = true;
+		UE_LOG(LogOSCulator, Verbose, TEXT("MIDI restart requested mid-dispatch; deferred until the drain finishes."));
+		return;
+	}
+	bRestartPending = false;
+	++RestartCount;
+
 	// Release anything sounding before the devices go away underneath it.
 	FlushPendingNoteOffs();
 
@@ -461,6 +475,10 @@ void UOscuMIDISubsystem::OpenDevices()
 
 void UOscuMIDISubsystem::DrainPorts()
 {
+	// Declared first so it runs last, after the guard has put bDraining back.
+	ON_SCOPE_EXIT { RunDeferredRestart(); };
+	TGuardValue<bool> DrainingGuard(bDraining, true);
+
 	for (FOscuMIDIPort& Port : Ports)
 	{
 		// The device travels with the message, because a binding may insist on one:
@@ -471,6 +489,16 @@ void UOscuMIDISubsystem::DrainPorts()
 		{
 			IngestMessage(Device, Message);
 		});
+	}
+}
+
+void UOscuMIDISubsystem::RunDeferredRestart()
+{
+	// Inside a nested drain or ingest bDraining is still true: the outermost one runs it.
+	if (!bDraining && bRestartPending)
+	{
+		bRestartPending = false;
+		Restart();
 	}
 }
 
@@ -831,6 +859,11 @@ int32 UOscuMIDISubsystem::IngestProgramChange(const int32 Channel, const int32 P
 
 int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessage& Message)
 {
+	// Every dispatch path comes through here (DrainPorts, Learn, tests): a Restart from
+	// a dispatched function waits until this message is done.
+	ON_SCOPE_EXIT { RunDeferredRestart(); };
+	TGuardValue<bool> DrainingGuard(bDraining, true);
+
 	++MessagesReceived;
 
 	const bool bIsNote = Message.Type == EOscuMIDIInputType::Note;

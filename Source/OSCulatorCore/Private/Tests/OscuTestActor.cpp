@@ -26,6 +26,16 @@ void AOscuTestActor::Stop()
 	LastCalled = TEXT("Stop");
 }
 
+void AOscuTestActor::RunHook()
+{
+	++CallCount;
+	LastCalled = TEXT("RunHook");
+	if (Hook)
+	{
+		Hook();
+	}
+}
+
 void AOscuTestActor::SetIntensity(double Intensity)
 {
 	++CallCount;

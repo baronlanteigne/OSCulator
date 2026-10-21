@@ -72,7 +72,12 @@ public:
 	int32 GetTargetCount() const { return Senders.Num(); }
 	const TArray<TUniquePtr<FOscuOSCSender>>& GetSenders() const { return Senders; }
 
-	/** Closes and reopens both directions, re-reading settings. */
+	/**
+	 * Closes and reopens both directions, re-reading settings.
+	 *
+	 * Called from inside a dispatch (a Blueprint reloading OSCulator.ini, say), it is
+	 * deferred until Drain has finished with the batch.
+	 */
 	void Restart();
 
 	/**
@@ -101,6 +106,10 @@ private:
 	void HandleWorldPreActorTick(UWorld* TickingWorld, ELevelTick TickType, float DeltaSeconds);
 
 	void Drain();
+
+	/** True while Drain is on the stack; a Restart then only sets bRestartPending. */
+	bool bDraining = false;
+	bool bRestartPending = false;
 
 	/** True if the message was a describe request and has been answered. */
 	bool HandleDescribeRequest(const FOscuMessage& Message);

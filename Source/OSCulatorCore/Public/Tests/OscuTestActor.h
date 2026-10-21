@@ -52,6 +52,13 @@ public:
 	UFUNCTION()
 	void Stop();
 
+	/** No arguments; runs Hook. Lets a test act from inside a dispatch (reload mid-drain). */
+	UFUNCTION()
+	void RunHook();
+
+	/** Not reflected: plain C++ the test sets before sending the message. */
+	TFunction<void()> Hook;
+
 	/** Blueprint "Float" pins are doubles in UE5; this is the common case. */
 	UFUNCTION()
 	void SetIntensity(double Intensity);
