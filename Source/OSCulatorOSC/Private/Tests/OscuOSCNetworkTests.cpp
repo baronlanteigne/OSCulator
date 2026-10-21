@@ -472,6 +472,8 @@ bool FOscuNetRestartDeferredTest::RunTest(const FString& Parameters)
 	{
 		Settings->ListenPort = SavedPort;
 		Settings->AllowedSenderIPs = SavedAllowed;
+		// A live PIE world restarted along with ours must not keep the test port and open allow-list.
+		UOscuSettings::OnSettingsChanged.Broadcast();
 	};
 
 	// Ephemeral port to start; loopback must not be filtered out by the project's list.

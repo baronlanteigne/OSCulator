@@ -476,6 +476,8 @@ void UOscuMIDISubsystem::OpenDevices()
 void UOscuMIDISubsystem::DrainPorts()
 {
 	// Declared first so it runs last, after the guard has put bDraining back.
+	// This guard is what keeps the nested IngestMessage's exit from restarting (and
+	// freeing Ports) mid-loop; not covered by a test, as it needs real hardware.
 	ON_SCOPE_EXIT { RunDeferredRestart(); };
 	TGuardValue<bool> DrainingGuard(bDraining, true);
 
