@@ -52,9 +52,10 @@ namespace OscuEndpointFile
 	OSCULATORCORE_API TArray<FString> Diff(const FString& BeforeText, const FString& AfterText);
 
 	/**
-	 * Where OSCulator.ini lives. Uncooked (editor, -game): <Project>/OSCulator/.
-	 * Cooked: next to the exe (<Package>/OSCulator.ini), falling back to
-	 * <Package>/<Project>/OSCulator/ if the staging remap did not move it.
+	 * Where OSCulator.ini lives. Uncooked (editor, -game): <Project>/OSCulator.ini,
+	 * next to the .uproject. Cooked: next to the exe (<Package>/OSCulator.ini),
+	 * falling back to <Package>/<Project>/Intermediate/OSCulatorStage/OSCulator.ini
+	 * if only that exists (the staging remap did not move it).
 	 */
 	OSCULATORCORE_API FString GetPath();
 

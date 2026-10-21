@@ -483,19 +483,19 @@ TArray<FString> OscuEndpointFile::Diff(const FString& BeforeText, const FString&
 
 FString OscuEndpointFile::GetPath()
 {
-	const FString InProject = FPaths::ConvertRelativePathToFull(
-		FPaths::Combine(FPaths::ProjectDir(), TEXT("OSCulator"), TEXT("OSCulator.ini")));
-
 	if (!FPlatformProperties::RequiresCookedData())
 	{
-		return InProject;
+		return FPaths::ConvertRelativePathToFull(
+			FPaths::Combine(FPaths::ProjectDir(), TEXT("OSCulator.ini")));
 	}
 
 	const FString NextToExe = FPaths::ConvertRelativePathToFull(
 		FPaths::Combine(FPaths::RootDir(), TEXT("OSCulator.ini")));
-	if (!FPaths::FileExists(NextToExe) && FPaths::FileExists(InProject))
+	const FString Staged = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectDir(), TEXT("Intermediate"), TEXT("OSCulatorStage"), TEXT("OSCulator.ini")));
+	if (!FPaths::FileExists(NextToExe) && FPaths::FileExists(Staged))
 	{
-		return InProject;
+		return Staged;
 	}
 	return NextToExe;
 }
