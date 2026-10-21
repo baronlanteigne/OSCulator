@@ -76,6 +76,17 @@ namespace OscuEndpointFile
 	/** True in the editor proper: never in -game, packaged builds or commandlets. */
 	bool ShouldSyncDefaultConfig();
 
-	/** One line for OSCulator.Status: which file loaded and what it changed. */
+	/**
+	 * Re-reads Path over the live settings, then broadcasts OnSettingsChanged so OSC
+	 * sockets and MIDI ports reopen. With bSyncDefaultConfig, DefaultGame.ini is
+	 * updated to match. False if the file is missing or unreadable (nothing changed).
+	 * Either way the result becomes DescribeLastLoad().
+	 */
+	OSCULATORCORE_API bool ReloadFrom(const FString& Path, bool bSyncDefaultConfig);
+
+	/** ReloadFrom(GetPath()), syncing DefaultGame.ini only in the editor proper. */
+	OSCULATORCORE_API bool Reload();
+
+	/** One line for OSCulator.Status: which file loaded (at startup or by the last reload) and what it changed. */
 	OSCULATORCORE_API FString DescribeLastLoad();
 }

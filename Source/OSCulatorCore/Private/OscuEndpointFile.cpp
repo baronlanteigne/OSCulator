@@ -14,7 +14,8 @@ namespace
 	const TCHAR* const OSCTargetPrefix = TEXT("OSC Target ");
 	const TCHAR* const MIDIInDevicePrefix = TEXT("MIDI In ");
 
-	// Game thread only: written at startup (and by the reload command), read by OSCulator.Status.
+	// Game thread only: written by LoadAtStartup and by ReloadFrom (OSCulator.ReloadConfig,
+	// the Reload OSCulator Config node), read by OSCulator.Status.
 	FString GLastLoad = TEXT("OSCulator.ini: not loaded.");
 
 	FString LogResult(const FString& Path, const TArray<FString>& Overrides, const TArray<FString>& Warnings)
@@ -515,7 +516,12 @@ bool OscuEndpointFile::Save(const UOscuSettings& Settings, const FString& Path)
 	}
 	if (!IFileManager::Get().Move(*Path, *Temp, /*Replace*/ true, /*EvenIfReadOnly*/ false))
 	{
-		IFileManager::Get().Delete(*Temp, /*RequireExists*/ false, /*EvenReadOnly*/ true);
+		// Only while the old file is still there: if Move already deleted it, the .tmp
+		// is the only copy left, and LoadOrCreate recovers it on the next launch.
+		if (FPaths::FileExists(Path))
+		{
+			IFileManager::Get().Delete(*Temp, /*RequireExists*/ false, /*EvenReadOnly*/ true);
+		}
 		return false;
 	}
 	return true;
@@ -530,7 +536,8 @@ bool OscuEndpointFile::LoadOrCreate(UOscuSettings& Settings, const FString& Path
 	const FString Temp = Path + TEXT(".tmp");
 	if (!FPaths::FileExists(Path) && FPaths::FileExists(Temp))
 	{
-		if (IFileManager::Get().Move(*Path, *Temp, /*Replace*/ false, /*EvenIfReadOnly*/ false))
+		// No retry: a locked .tmp must not stall startup; it falls through to the missing-file path below.
+		if (IFileManager::Get().Move(*Path, *Temp, /*Replace*/ false, /*EvenIfReadOnly*/ false, /*Attributes*/ false, /*bDoNotRetryOrError*/ true))
 		{
 			UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini: recovered OSCulator.ini from an interrupted save (%s)."), *Temp);
 		}
@@ -608,6 +615,37 @@ void OscuEndpointFile::LoadAtStartup(UOscuSettings& Settings)
 			}
 		});
 	}
+}
+
+bool OscuEndpointFile::ReloadFrom(const FString& Path, bool bSyncDefaultConfig)
+{
+	FString Text;
+	if (!FFileHelper::LoadFileToString(Text, *Path))
+	{
+		GLastLoad = FString::Printf(TEXT("OSCulator.ini: reload failed, %s is missing or unreadable; nothing changed."), *Path);
+		UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ReloadConfig: %s is missing or unreadable; nothing changed."), *Path);
+		return false;
+	}
+
+	UOscuSettings* Settings = GetMutableDefault<UOscuSettings>();
+	TArray<FString> Warnings;
+	const TArray<FString> Overrides = Apply(Text, *Settings, Warnings);
+	GLastLoad = LogResult(Path, Overrides, Warnings);
+
+#if WITH_EDITOR
+	if (bSyncDefaultConfig && Overrides.Num() > 0 && !Settings->TryUpdateDefaultConfigFile())
+	{
+		UE_LOG(LogOSCulator, Warning, TEXT("OSCulator.ini values are in use, but could not be copied into DefaultGame.ini (read-only, or not checked out?)."));
+	}
+#endif
+
+	UOscuSettings::OnSettingsChanged.Broadcast();
+	return true;
+}
+
+bool OscuEndpointFile::Reload()
+{
+	return ReloadFrom(GetPath(), ShouldSyncDefaultConfig());
 }
 
 FString OscuEndpointFile::DescribeLastLoad()

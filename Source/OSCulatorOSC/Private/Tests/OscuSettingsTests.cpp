@@ -4,10 +4,15 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "OscuEndpointFile.h"
 #include "OscuOSCSubsystem.h"
 #include "Tests/OscuTestWorld.h"
 
+#include "HAL/FileManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 
 namespace OscuSettingsTest
 {
@@ -87,5 +92,50 @@ bool FOscuSettingsOSCInGateTest::RunTest(const FString& Parameters)
 // Project Settings. What is worth testing is that a setting is HONOURED, which is
 // what the gate test above does: it sets the value itself, then checks what the
 // runtime did about it.
+
+//////////////////////////////////////////////////////////////////////////
+// Reload really reopens the socket with the file's port
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuEndpointReloadTest,
+	"OSCulator.EndpointFile.ReloadReopensSocket",
+	OscuTest::Flags)
+
+bool FOscuEndpointReloadTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+
+	UOscuSettings* Settings = GetMutableDefault<UOscuSettings>();
+	const FString Saved = OscuEndpointFile::Write(*Settings);
+	const FString Path = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectIntermediateDir(), TEXT("OSCulatorTests"), TEXT("Reload.ini")));
+
+	// Declared before the world, so it runs after the world is gone.
+	ON_SCOPE_EXIT
+	{
+		TArray<FString> Ignored;
+		OscuEndpointFile::Apply(Saved, *Settings, Ignored);
+		UOscuSettings::OnSettingsChanged.Broadcast();
+		IFileManager::Get().Delete(*Path, false, true);
+	};
+
+	FScopedTestWorld Scope(/*bEnableOSCInput*/ true);
+	Scope.BeginPlay();
+	UOscuOSCSubsystem* OSC = UOscuOSCSubsystem::Get(Scope.World);
+	if (!TestNotNull(TEXT("The OSC subsystem exists"), OSC))
+	{
+		return false;
+	}
+
+	const int32 NewPort = 47123;
+	const FString Text = OscuEndpointFile::Write(*Settings)
+		.Replace(*FString::Printf(TEXT("ListenPort=%d"), Settings->ListenPort), *FString::Printf(TEXT("ListenPort=%d"), NewPort));
+	FFileHelper::SaveStringToFile(Text, *Path);
+
+	TestTrue(TEXT("Reload succeeded"), OscuEndpointFile::ReloadFrom(Path, /*bSyncDefaultConfig*/ false));
+	TestTrue(TEXT("Still listening"), OSC->IsListening());
+	TestEqual(TEXT("Listening on the file's port"), OSC->GetListenPort(), NewPort);
+	return true;
+}
 
 #endif // WITH_DEV_AUTOMATION_TESTS

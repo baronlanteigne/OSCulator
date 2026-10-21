@@ -1,6 +1,7 @@
 // Copyright Baron Lanteigne. All Rights Reserved.
 
 #include "OSCulatorCore.h"
+#include "OscuEndpointFile.h"
 #include "OscuOSCSubsystem.h"
 #include "OscuRouterSubsystem.h"
 #include "OscuSettings.h"
@@ -20,6 +21,7 @@ namespace
 		}
 
 		const UOscuSettings& Settings = *UOscuSettings::Get();
+		Ar.Log(*FString::Printf(TEXT("[OSCulator] %s"), *OscuEndpointFile::DescribeLastLoad()));
 
 		if (!OSC->IsListening())
 		{
