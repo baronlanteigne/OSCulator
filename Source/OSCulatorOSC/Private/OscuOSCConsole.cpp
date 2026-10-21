@@ -13,6 +13,9 @@ namespace
 {
 	void StatusCommand(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
 	{
+		// First, so it shows outside PIE too: which OSCulator.ini loaded is not per-world.
+		Ar.Log(*FString::Printf(TEXT("[OSCulator] %s"), *OscuEndpointFile::DescribeLastLoad()));
+
 		UOscuOSCSubsystem* OSC = UOscuOSCSubsystem::Get(World);
 		if (OSC == nullptr)
 		{
@@ -21,7 +24,6 @@ namespace
 		}
 
 		const UOscuSettings& Settings = *UOscuSettings::Get();
-		Ar.Log(*FString::Printf(TEXT("[OSCulator] %s"), *OscuEndpointFile::DescribeLastLoad()));
 
 		if (!OSC->IsListening())
 		{
