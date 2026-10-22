@@ -129,7 +129,11 @@ job:
   Enabled → On Pulse(Index)), or Get Pulse Phase to drive something smoothly. Up to a
   frame late, which you can't see.
 - **Sound:** **Play On Pulse** (Audio Component, Division). Sample-accurate, on the
-  clock's Quartz clock `Main`.
+  clock's Quartz clock `Main`. Safe to call on every step or every frame: while the
+  component's sound is still waiting or sounding, extra calls are ignored, so you get at
+  most one sound per pulse. Users who call the engine's Play Quantized directly in a
+  stepper hit the opposite: each call cancels the last queued sound, and a fast stepper
+  goes almost silent (the camera orbit clicks dropped to about one a second that way).
 - **Your own Quartz logic:** **Get Quartz Clock**. Never make a second Quartz clock.
 
 Divisions use the same dropdown as Quartz (1/32 … Whole, dotted, triplets, Beat, Bar).

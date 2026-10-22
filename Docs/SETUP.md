@@ -878,8 +878,15 @@ Get Pulse Index (Division)           -> whole pulses since beat 0, from 0
 Get Pulse Phase (Division)           -> 0-1 through the current pulse
 Get Seconds Per Pulse (Division)     Get Beats Per Pulse (Division)
 Get Quartz Clock (World Context)     -> this world's Quartz clock handle
-Play On Pulse (Audio Component, Division, Delegate)
+Play On Pulse (Audio Component, Division, Delegate) -> true if it queued the sound
 ```
+
+**Play On Pulse can be called every frame.** In Unreal, playing an audio component again
+cancels the sound it has queued, so a stepper calling Play Quantized on each step can
+cancel nearly every sound before its pulse arrives. Play On Pulse ignores a call, and
+returns false, while that component's last sound is still waiting for its pulse or still
+sounding. So a burst of calls inside one pulse makes one sound on that pulse. Once the
+sound has finished, or a pulse plus 50 ms has passed, the next call plays again.
 
 Everything counts from 0: a DAW's bar 1, beat 1 is Bar 0, Beat In Bar 0.
 

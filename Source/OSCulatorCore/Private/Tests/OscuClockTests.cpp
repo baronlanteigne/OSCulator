@@ -398,4 +398,50 @@ bool FOscuClockPulseComponentTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+//////////////////////////////////////////////////////////////////////////
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuClockPlayOnPulseHoldTest,
+	"OSCulator.Clock.PlayOnPulseHold",
+	OscuTest::Flags)
+
+bool FOscuClockPlayOnPulseHoldTest::RunTest(const FString& Parameters)
+{
+	using Q = EQuartzCommandQuantization;
+
+	OscuClockTest::FScopedClock Scope;
+	if (!TestNotNull(TEXT("The clock subsystem exists"), Scope.Clock))
+	{
+		return false;
+	}
+	UOscuClockSubsystem& Clock = *Scope.Clock;
+
+	// Stand-ins for two audio components. A 1/32 at 120 BPM is 62.5 ms.
+	UObject* Orbit = NewObject<UOscuClockTestListener>();
+	UObject* Focus = NewObject<UOscuClockTestListener>();
+
+	TestTrue(TEXT("The first call plays"), Clock.ClaimPulsePlay(Orbit, false, Q::ThirtySecondNote));
+	TestFalse(TEXT("A call while that sound waits for its pulse is ignored"), Clock.ClaimPulsePlay(Orbit, true, Q::ThirtySecondNote));
+
+	Scope.Step(0.03);
+	TestFalse(TEXT("...and still ignored partway through the pulse"), Clock.ClaimPulsePlay(Orbit, true, Q::ThirtySecondNote));
+	TestTrue(TEXT("Another component is not held by this one"), Clock.ClaimPulsePlay(Focus, false, Q::ThirtySecondNote));
+
+	Scope.Step(0.04);
+	TestTrue(TEXT("Once the sound has finished, the next call plays at once"), Clock.ClaimPulsePlay(Orbit, false, Q::ThirtySecondNote));
+
+	// A long sound still playing after a pulse plus the margin can be played again.
+	Scope.Step(0.2);
+	TestTrue(TEXT("After a pulse and the margin, a still-playing sound can restart"), Clock.ClaimPulsePlay(Orbit, true, Q::ThirtySecondNote));
+	TestFalse(TEXT("...and that new one is held in turn"), Clock.ClaimPulsePlay(Orbit, true, Q::ThirtySecondNote));
+
+	// The hold follows the division: a bar holds for a bar.
+	Scope.Step(0.5);
+	TestTrue(TEXT("A bar-long sound plays"), Clock.ClaimPulsePlay(Focus, false, Q::Bar));
+	Scope.Step(1.5);
+	TestFalse(TEXT("...and holds 1.5 s into its 2 s pulse"), Clock.ClaimPulsePlay(Focus, true, Q::Bar));
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

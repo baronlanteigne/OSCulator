@@ -206,9 +206,25 @@ public:
 	 * Quartz clock in its world. Counted from beat 0 like Get Pulse Index, so it lands on
 	 * the pulse a Pulse component with the same Division fires for. Without a Quartz clock
 	 * it plays at once, with a warning.
+	 *
+	 * Call it as often as you like. While the component's last sound is still waiting for
+	 * its pulse, or still sounding inside the pulse after it, a new call is ignored and
+	 * returns false: playing a component again cancels the sound it has queued, so calls
+	 * every frame would otherwise cancel nearly every one. A burst of calls inside one
+	 * pulse makes one sound on that pulse. Once that sound has finished, or a pulse plus a
+	 * little has gone by, the next call plays again.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "OSCulator|Clock", meta = (AutoCreateRefTerm = "Delegate", AdvancedDisplay = "Delegate"))
-	void PlayOnPulse(UAudioComponent* AudioComponent, EQuartzCommandQuantization Division, const FOnQuartzCommandEventBP& Delegate);
+	bool PlayOnPulse(UAudioComponent* AudioComponent, EQuartzCommandQuantization Division, const FOnQuartzCommandEventBP& Delegate);
+
+	/**
+	 * Play On Pulse's bookkeeping, apart from the audio so a test can drive it. True if a
+	 * sound for Key may be queued now, and then records how long to hold further calls:
+	 * one pulse of Division and a margin for Quartz's scheduling lead. False while that
+	 * hold runs and the sound is still playing. bStillPlaying is the component's Is Playing,
+	 * which a queued sound counts as.
+	 */
+	bool ClaimPulsePlay(const UObject* Key, bool bStillPlaying, EQuartzCommandQuantization Division);
 
 	// ---- Events ----
 
@@ -281,6 +297,9 @@ private:
 
 	/** Our beat on which the Quartz clock restarts next, or -1 when it is already aligned. */
 	int32 PendingQuartzAlignBeat = -1;
+
+	/** Per component, the time (Now) until which Play On Pulse ignores it while it still plays. */
+	TMap<TWeakObjectPtr<const UObject>, double> PulsePlayHolds;
 
 	float BPM = 120.0f;
 	int32 BeatsPerBar = 4;

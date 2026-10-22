@@ -394,6 +394,7 @@ void UOscuClockSubsystem::ResetForTest()
 	bStartedByPlay = false;
 	bBPMSetAtRuntime = false;
 	LastFiredBeat = -1;
+	PulsePlayHolds.Reset();
 	Reanchor(0.0);
 	ApplySettings();
 }
@@ -493,11 +494,42 @@ UQuartzClockHandle* UOscuClockSubsystem::GetQuartzClock(const UObject* WorldCont
 	return FindOrMakeQuartzClock(*World, true);
 }
 
-void UOscuClockSubsystem::PlayOnPulse(UAudioComponent* AudioComponent, EQuartzCommandQuantization Division, const FOnQuartzCommandEventBP& Delegate)
+bool UOscuClockSubsystem::ClaimPulsePlay(const UObject* Key, bool bStillPlaying, EQuartzCommandQuantization Division)
+{
+	// Quartz schedules ahead of the audio it renders; a sound queued just before a pulse can
+	// land on the one after. The margin covers that, so a hold never ends while it waits.
+	constexpr double SchedulingMargin = 0.05;
+
+	const double NowSeconds = Now();
+	if (const double* HoldUntil = PulsePlayHolds.Find(Key))
+	{
+		if (bStillPlaying && NowSeconds < *HoldUntil)
+		{
+			return false;
+		}
+	}
+
+	// Components come and go with actors; drop the ones that have.
+	if (PulsePlayHolds.Num() > 64)
+	{
+		for (auto It = PulsePlayHolds.CreateIterator(); It; ++It)
+		{
+			if (!It.Key().IsValid() || It.Value() <= NowSeconds)
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
+
+	PulsePlayHolds.Add(Key, NowSeconds + GetSecondsPerPulse(Division) + SchedulingMargin);
+	return true;
+}
+
+bool UOscuClockSubsystem::PlayOnPulse(UAudioComponent* AudioComponent, EQuartzCommandQuantization Division, const FOnQuartzCommandEventBP& Delegate)
 {
 	if (AudioComponent == nullptr)
 	{
-		return;
+		return false;
 	}
 
 	UWorld* World = AudioComponent->GetWorld();
@@ -508,7 +540,13 @@ void UOscuClockSubsystem::PlayOnPulse(UAudioComponent* AudioComponent, EQuartzCo
 		UE_LOG(LogOSCulator, Warning, TEXT("Play On Pulse: no Quartz clock for '%s' (not in a game world, or Quartz Clock is None). Playing it now."),
 			*AudioComponent->GetPathName());
 		AudioComponent->Play();
-		return;
+		return true;
+	}
+
+	// Playing the component again would stop the sound it has queued for the pulse.
+	if (!ClaimPulsePlay(AudioComponent, AudioComponent->IsPlaying(), Division))
+	{
+		return false;
 	}
 
 	// Transport Relative counts from the Quartz clock's 0, which is our beat 0 (or one of
@@ -516,6 +554,7 @@ void UOscuClockSubsystem::PlayOnPulse(UAudioComponent* AudioComponent, EQuartzCo
 	// restart a dotted 1/8 at every bar line instead.
 	FQuartzQuantizationBoundary Boundary(Division, 1.0f, EQuarztQuantizationReference::TransportRelative);
 	AudioComponent->PlayQuantized(World, Handle, Boundary, Delegate);
+	return true;
 }
 
 UQuartzClockHandle* UOscuClockSubsystem::FindOrMakeQuartzClock(UWorld& World, bool bCreate)
