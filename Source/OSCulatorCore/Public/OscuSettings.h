@@ -46,8 +46,9 @@ struct OSCULATORCORE_API FOscuOSCTarget
  * with it. Measured on a sequencer running at tempo, clock alone was 68% of the
  * traffic on the wire.
  *
- * Clock, transport and sysex start unticked because nothing in OSCulator can act on
- * them today. Everything that carries a playable value starts ticked, so a device
+ * Clock and sysex start unticked because nothing in OSCulator acts on them, and
+ * transport because only the clock does, and only from the device that runs the show.
+ * Everything that carries a playable value starts ticked, so a device
  * works as expected out of the box and narrowing it is a deliberate act.
  *
  * To cut continuous controller traffic specifically, reach for a device's Ignored
@@ -92,12 +93,16 @@ struct FOscuMIDIInputMessages
 	 *
 	 * Around fifty messages a second at any ordinary tempo, and a hundred for
 	 * timecode, arriving whether or not anyone is playing. This is the one that
-	 * overflows queues. Tick it only to count clock yourself.
+	 * overflows queues. OSCulator's own clock never reads it, so ticking it only
+	 * fills the queue.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Listen For")
 	bool bClock = false;
 
-	/** Start, stop, continue, song position, song select. A handful per button press, so cheap to keep. */
+	/**
+	 * Start, stop, continue, song position, song select. A handful per button press, so
+	 * cheap to keep. Tick it on the device that should start and stop the OSCulator clock.
+	 */
 	UPROPERTY(EditAnywhere, Category = "Listen For")
 	bool bTransport = false;
 
@@ -460,4 +465,92 @@ public:
 	UPROPERTY(EditAnywhere, Config, Category = "MIDI Output",
 		meta = (EditCondition = "bEnableMIDIOut", EditConditionHides))
 	TArray<FString> MIDIOutputDeviceNames;
+
+	// ---- Clock ----
+
+	/**
+	 * The clock's tempo until something sets another: MIDI or OSC (below), or Set BPM
+	 * from a Blueprint. Once either has, editing this no longer overrides it until the editor
+	 * restarts.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock",
+		meta = (DisplayName = "BPM", ClampMin = "20.0", ClampMax = "999.0"))
+	float ClockBPM = 120.0f;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Clock",
+		meta = (DisplayName = "Beats Per Bar", ClampMin = "1", ClampMax = "32"))
+	int32 ClockBeatsPerBar = 4;
+
+	/**
+	 * Start the clock from beat 0 when play begins, unless it is already running.
+	 *
+	 * Untick it when MIDI Start should be the only thing that starts it. A clock started
+	 * this way stops when play ends; one started by transport or a Blueprint keeps going.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "Start With Play"))
+	bool bClockStartWithPlay = true;
+
+	/**
+	 * MIDI Start, Stop, Continue and Song Position drive the clock. MIDI clock itself is
+	 * never read. The input device must have Transport ticked under its Listen For.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "Follow MIDI Transport"))
+	bool bClockFollowsMIDITransport = true;
+
+	/**
+	 * Only take transport and tempo from this input device. Empty takes them from any.
+	 * Must match a name under MIDI Input Devices.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "MIDI Device"))
+	FString ClockMIDIDevice;
+
+	/**
+	 * Set the tempo from a control change. MIDI has no tempo message apart from clock, so
+	 * the sender maps its BPM onto one CC: 0-127 becomes BPM Min-BPM Max. The default
+	 * 60-187 range is exactly one BPM per step. The CC still reaches the map assets too.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "BPM From CC"))
+	bool bClockBPMFromCC = false;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Clock",
+		meta = (EditCondition = "bClockBPMFromCC", EditConditionHides, DisplayName = "BPM Channel", ClampMin = "1", ClampMax = "16"))
+	int32 ClockBPMChannel = 1;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Clock",
+		meta = (EditCondition = "bClockBPMFromCC", EditConditionHides, DisplayName = "BPM Control Number", ClampMin = "0", ClampMax = "127"))
+	int32 ClockBPMControl = 20;
+
+	/** The BPM a CC value of 0 means. */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock",
+		meta = (EditCondition = "bClockBPMFromCC", EditConditionHides, DisplayName = "BPM Min", ClampMin = "20.0", ClampMax = "999.0"))
+	float ClockBPMMin = 60.0f;
+
+	/** The BPM a CC value of 127 means. */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock",
+		meta = (EditCondition = "bClockBPMFromCC", EditConditionHides, DisplayName = "BPM Max", ClampMin = "20.0", ClampMax = "999.0"))
+	float ClockBPMMax = 187.0f;
+
+	/**
+	 * Set the tempo from OSC: one number, the BPM, at this address. For a sender that
+	 * already knows the tempo -- TouchDesigner reading it off MIDI clock, say. The message
+	 * is answered here and never routed to a tagged actor. A value under 20 is taken as
+	 * "no tempo yet" and ignored. Empty turns it off.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "BPM OSC Address"))
+	FString ClockBPMOSCAddress = TEXT("/clock/SetBPM");
+
+	/**
+	 * The one Quartz clock the clock keeps in every game world, for sample-accurate sound:
+	 * made when play starts, removed at world cleanup, at this clock's tempo and bars, and
+	 * restarted with it on Start (re-aligned on the next beat after Continue or Set
+	 * Position). Get it with Get Quartz Clock, or use Play On Pulse. None turns it off.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "Quartz Clock"))
+	FName ClockQuartzName = TEXT("Main");
+
+	/** The tempo a BPM CC value stands for, under BPM Min and BPM Max. */
+	float ClockBPMFromCCValue(int32 Value) const
+	{
+		return FMath::Lerp(ClockBPMMin, ClockBPMMax, FMath::Clamp(Value, 0, 127) / 127.0f);
+	}
 };

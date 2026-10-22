@@ -37,6 +37,11 @@ int32 UOscuMIDILibrary::SendMIDINote(FName Device, int32 Channel, int32 Note, in
 	return MIDI != nullptr ? MIDI->SendNote(Channel, Note, Velocity, DurationSeconds, ResolveDevice(Device)) : 0;
 }
 
+int32 UOscuMIDILibrary::SendMIDINoteStruct(const FOscuMIDINote& Note)
+{
+	return SendMIDINote(Note.Device, Note.Channel, Note.Note, Note.Velocity, Note.Length);
+}
+
 int32 UOscuMIDILibrary::SendMIDINoteOn(FName Device, int32 Channel, int32 Note, int32 Velocity)
 {
 	UOscuMIDISubsystem* MIDI = UOscuMIDISubsystem::Get();

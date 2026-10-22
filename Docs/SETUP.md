@@ -761,6 +761,7 @@ dropdown lists **outputs only**.
 
 ```
 Send MIDI Note           (Device, Channel, Note, Velocity, Duration Seconds)
+Send MIDI Note (Struct)  (MIDI Note)
 Send MIDI Note On        (Device, Channel, Note, Velocity)
 Send MIDI Note Off       (Device, Channel, Note)
 Send MIDI Control Change (Device, Channel, Control Number, Value)
@@ -781,6 +782,127 @@ outstanding is flushed on End PIE and on shutdown. A note left on is a stuck not
 real hardware, and nothing inside Unreal can silence it afterwards.
 
 **Release All MIDI Notes** is the panic button.
+
+### The MIDI Note struct
+
+**OSCu MIDI Note** holds one note's settings — Device (the same output dropdown),
+Channel, Note, Velocity and Length — so a Blueprint that fires a note when something
+happens can expose it as one variable and edit it in the Details panel. **Send MIDI
+Note (Struct)** sends it exactly as Send MIDI Note would, with Length as the duration.
+
+A new struct sends to `(all)`, channel 1, note 60, velocity 127, Length 0.1 s.
+
+**Keep Length above one frame of the slowest receiver.** A receiver that samples MIDI
+once per frame — TouchDesigner's MIDI In CHOP — never sees a note whose off arrives
+in the same frame as its on. 0.1 s is about six frames at 60 fps. Two sends of the
+same note inside one Length each schedule their own release, so the receiver sees
+on, on, off, off.
+
+---
+
+## 6b. Clock
+
+**Project Settings → Plugins → OSCulator → Clock**
+
+A local tempo clock: beats and bars at a BPM, counted in Unreal. It runs **alongside**
+your DAW's clock, not slaved to it — it never reads MIDI clock (0xF8). From MIDI it
+takes only transport and, optionally, tempo:
+
+| MIDI in | Clock |
+|---|---|
+| Start | Start from beat 0 |
+| Stop | Stop, holding the position |
+| Continue | Run from the held position |
+| Song Position | Move to that position (sixteenth notes ÷ 4 = beats) |
+| The BPM CC (optional) | Set BPM: 0–127 maps to BPM Min–BPM Max |
+
+Tempo can also come over OSC; see **Tempo over OSC** below.
+
+The two clocks drift apart slowly if left running; every Start or Continue lines them
+up again. That is the trade for not reading clock: no 24-per-beat message stream to
+flood the input queue, and no jittery tempo estimate.
+
+**Setup:** tick **Transport** under the sending device's **Listen For**. Leave **Clock**
+unticked — OSCulator drops it anyway. **MIDI Device** limits transport and tempo to one
+input; empty takes them from any.
+
+**Tempo over MIDI.** MIDI has no tempo message apart from clock, so the sender maps
+its BPM onto one control change. With the default BPM Min 60 and BPM Max 187, each CC
+step is exactly one BPM (CC 60 = 120 BPM). The CC still reaches your map assets.
+
+**Tempo over OSC.** Send one number, the BPM, to **BPM OSC Address** (`/clock/SetBPM`
+by default). Use it when something else already knows the tempo, such as TouchDesigner
+reading it off MIDI clock. The message goes to the clock, not to a tagged actor. A value
+under 20 is ignored, because TouchDesigner reads 0 until clock arrives. Round the value
+before sending: a tempo worked out from MIDI clock wobbles by a few hundredths. Clear the
+address to turn this off.
+
+**Quartz clock.** For sample-accurate sound the clock owns one Quartz clock per game
+world, named by **Quartz Clock** (`Main` by default). It is made when play starts,
+before any actor's BeginPlay, and removed at world cleanup. It follows the tempo and Beats
+Per Bar, restarts from 0 on every Start, and keeps running while transport is stopped, so
+queued sounds never hang. Quartz can't jump to a fractional position, so after a Continue
+or Set Position it restarts on the next beat (beats line up), then again on the next
+point where every division lines up (12 beats in 4/4). Those restarts happen on the
+first frame after the beat, so they can be up to a frame late. Use **Play On Pulse**, or
+**Get Quartz Clock** with Play Quantized. Never make your own Quartz clock. Set Quartz
+Clock to None to turn this off.
+
+**Watching it.** `OSCulator.ClockMonitor 1` logs start, stop and tempo changes;
+`OSCulator.ClockMonitor 2` also logs every beat, counted from 1 like a DAW shows it.
+
+**Real time, not game time.** Pause, global time dilation and slow motion do not
+affect it. Position is worked out from the time since the last tempo change rather
+than added up per frame, so it does not drift with frame rate.
+
+**It runs at engine level**, like MIDI output: transport that arrives while only the
+editor is open still starts it, so a clock your DAW started before you pressed Play is
+already in phase. **Start With Play** starts it from beat 0 when play begins, unless it
+is already running; a clock started that way stops when play ends.
+
+### Blueprint
+
+`Get Engine Subsystem (OSCu Clock Subsystem)`, then:
+
+```
+Start / Stop / Continue / Set Position (Beats)
+Set BPM / Set Beats Per Bar
+Get BPM, Is Running
+Get Position        -> beats, fractional (2.5 = halfway through the third beat)
+Get Beat, Get Bar, Get Beat In Bar   -> whole numbers, counting from 0
+Get Beat Phase, Get Bar Phase        -> 0-1
+On Beat (Beat, Bar, Beat In Bar)     On Bar (Bar)
+On Start / On Stop / On BPM Changed (BPM)
+
+Get Pulse Index (Division)           -> whole pulses since beat 0, from 0
+Get Pulse Phase (Division)           -> 0-1 through the current pulse
+Get Seconds Per Pulse (Division)     Get Beats Per Pulse (Division)
+Get Quartz Clock (World Context)     -> this world's Quartz clock handle
+Play On Pulse (Audio Component, Division, Delegate)
+```
+
+Everything counts from 0: a DAW's bar 1, beat 1 is Bar 0, Beat In Bar 0.
+
+**Divisions** are Quartz's own `EQuartzCommandQuantization`: 1/32 to Whole, dotted,
+triplets, Beat and Bar. Beat is a quarter note, as Quartz counts it in x/4; Bar is Beats
+Per Bar beats; Tick is a 1/32. Pulses count from beat 0, not from each bar, so a dotted
+1/8 runs straight across bar lines. That's Quartz's Transport Relative, and Play On Pulse
+uses it, so a sound and a Pulse component on the same Division hit the same pulse.
+
+### OSCu Pulse component
+
+Add **OSCu Pulse** to any actor for an event on every pulse: **Division**, **Offset**
+(0–1 of one pulse; 0.5 fires halfway between, so two effects at one rate interlace) and
+**Enabled**. **On Pulse (Index)** fires once per pulse, with the same rules as On Beat:
+up to a frame late, only the latest pulse after a hitch, nothing while stopped. Start
+fires pulse 0 at once; Continue mid-pulse waits for the next one. **Get Phase** is 0–1
+through the current pulse, Offset included. It's for visuals, lights, OSC/DMX and logic;
+for sound, use Play On Pulse.
+
+**Events land on the first frame after the beat**, so up to a frame late. After a
+hitch that skipped several beats, On Beat fires once, for the latest beat, and On Bar
+fires if a bar line was crossed — a burst of stale beats in one frame helps nobody.
+Start fires bar 0 and beat 0 immediately.
 
 ---
 

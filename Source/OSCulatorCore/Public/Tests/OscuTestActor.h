@@ -217,3 +217,37 @@ public:
 
 	UPROPERTY() int32 PingCount = 0;
 };
+
+/** Records what the clock broadcasts, so a test can check events rather than just state. */
+UCLASS(NotBlueprintable, Hidden)
+class UOscuClockTestListener : public UObject
+{
+	GENERATED_BODY()
+
+public:
+	UFUNCTION()
+	void HandleBeat(int32 Beat, int32 Bar, int32 BeatInBar);
+
+	UFUNCTION()
+	void HandleBar(int32 Bar);
+
+	UFUNCTION()
+	void HandleStart();
+
+	UFUNCTION()
+	void HandleStop();
+
+	UFUNCTION()
+	void HandlePulse(int32 Index);
+
+	UPROPERTY() int32 PulseCount = 0;
+	UPROPERTY() int32 LastPulse = -1;
+	UPROPERTY() int32 BeatCount = 0;
+	UPROPERTY() int32 LastBeat = -1;
+	UPROPERTY() int32 LastBeatBar = -1;
+	UPROPERTY() int32 LastBeatInBar = -1;
+	UPROPERTY() int32 BarCount = 0;
+	UPROPERTY() int32 LastBar = -1;
+	UPROPERTY() int32 StartCount = 0;
+	UPROPERTY() int32 StopCount = 0;
+};

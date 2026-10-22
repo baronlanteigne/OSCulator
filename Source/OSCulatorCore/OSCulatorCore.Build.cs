@@ -14,6 +14,8 @@ public class OSCulatorCore : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"DeveloperSettings",
+			// Quartz: the clock hands out a UQuartzClockHandle.
+			"AudioMixer",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

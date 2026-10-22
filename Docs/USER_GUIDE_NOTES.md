@@ -98,6 +98,68 @@ Reference: [Components answer for their actor](SETUP.md#components-answer-for-th
 
 Reference: [OSC output](SETUP.md#4-osc-output).
 
+## A note you set up once and fire later
+
+**Explain:** for "send this note when X happens", add a **MIDI Note** struct variable
+(OSCu MIDI Note), make it instance editable, and call **Send MIDI Note (Struct)** where
+X happens. Device is a dropdown of the configured outputs. The note off is automatic
+after Length; too short a Length and a frame-sampling receiver like TouchDesigner
+misses the note entirely, so the default is 0.1 s.
+
+Reference: [The MIDI Note struct](SETUP.md#the-midi-note-struct).
+
+## The clock runs alongside the DAW, not from it
+
+**Explain:** OSCulator's clock counts its own beats at its own BPM. From MIDI it takes
+Start/Stop/Continue/Song Position and, if set up, tempo from one CC — never MIDI clock.
+Users will expect "sync" to mean sample-locked; it means "started together, same
+tempo", re-aligned on every Start or Continue. Two gotchas: the device needs
+**Transport** ticked under Listen For, and the DAW has to be told to send transport to
+that port (in Ableton that is the port's Sync output, which also sends clock —
+harmless, OSCulator drops it). Beats count from 0, so the DAW's 1.1 is Bar 0, Beat 0.
+
+Reference: [Clock](SETUP.md#6b-clock).
+
+## One clock for everything that repeats
+
+**Explain:** anything that repeats at a fraction of the tempo should read the OSCulator
+clock, not keep its own timer or Quartz clock. There are three ways to do it, one per
+job:
+- **Visuals, lights, OSC/DMX, logic:** an **OSCu Pulse** component (Division, Offset,
+  Enabled → On Pulse(Index)), or Get Pulse Phase to drive something smoothly. Up to a
+  frame late, which you can't see.
+- **Sound:** **Play On Pulse** (Audio Component, Division). Sample-accurate, on the
+  clock's Quartz clock `Main`.
+- **Your own Quartz logic:** **Get Quartz Clock**. Never make a second Quartz clock.
+
+Divisions use the same dropdown as Quartz (1/32 … Whole, dotted, triplets, Beat, Bar).
+Beat is a quarter note. Pulses count from beat 0 straight across bar lines, so a dotted
+1/8 doesn't restart every bar. Offset 0.5 puts one effect halfway between another's
+pulses, which is how the hide roll and the camera clicks interlace.
+
+What users will notice:
+- After a **Continue** or **Set Position** mid-song, quantized sounds can sit up to one
+  beat off the grid until the next beat. Dotted and triplet sounds can sit off until the
+  next 12-beat point in 4/4. A fresh **Start** lines everything up at once.
+- The Quartz clock keeps ticking while transport is stopped, so a queued sound still
+  plays, but nothing re-aligns until the next Start or Continue.
+- Quartz runs on the audio device's clock and OSCulator on the system clock, so over a
+  long set they can drift apart slowly. Every Start realigns them.
+
+Reference: [Clock](SETUP.md#6b-clock).
+
+## Getting the tempo in without MIDI clock
+
+**Explain:** most DAWs can't send their tempo as a CC, so the BPM CC often isn't an
+option. The other way in is OSC: anything that already knows the tempo sends one number
+to `/clock/SetBPM`. In this project that's TouchDesigner, whose MIDI In shows a BPM
+channel worked out from MIDI clock. Tell users to round it and send it only when it
+changes, plus once a second so a fresh Play picks it up. 0 is ignored, because that's
+what TouchDesigner shows before clock arrives. The plugin also keeps a Quartz clock
+(`Main`) at this tempo, so quantized sounds follow it without any Blueprint.
+
+Reference: [Clock](SETUP.md#6b-clock).
+
 ## Event names that clash with variables
 
 **Explain:** Blueprint refuses an event named like an existing variable, so the event

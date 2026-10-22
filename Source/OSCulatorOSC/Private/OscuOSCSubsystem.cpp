@@ -3,6 +3,7 @@
 #include "OscuOSCSubsystem.h"
 
 #include "OSCulatorCore.h"
+#include "OscuClockSubsystem.h"
 #include "OscuOSCReceiver.h"
 #include "OscuMarshal.h"
 #include "OscuRouterSubsystem.h"
@@ -60,6 +61,33 @@ namespace OscuOSC
 		}
 
 		InOutMessages = MoveTemp(Result);
+	}
+
+	bool ApplyTempoMessage(const FOscuMessage& Message, const FString& TempoAddress)
+	{
+		if (TempoAddress.IsEmpty() || Message.Address != TempoAddress)
+		{
+			return false;
+		}
+
+		if (Message.Args.Num() == 0)
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("'%s' sets the clock's tempo and needs one number, the BPM."), *Message.Address);
+			return true;
+		}
+
+		// TouchDesigner reads 0 off MIDI clock until clock arrives. That is no tempo, not 20 BPM.
+		const double NewBPM = Message.Args[0].AsNumber();
+		if (NewBPM < 20.0)
+		{
+			return true;
+		}
+
+		if (UOscuClockSubsystem* Clock = UOscuClockSubsystem::Get())
+		{
+			Clock->SetBPM(static_cast<float>(NewBPM));
+		}
+		return true;
 	}
 }
 
@@ -289,6 +317,7 @@ void UOscuOSCSubsystem::OpenReceiver()
 	}
 
 	DescribeAddress = Settings.bEnableOSCOut ? Settings.DescribeAddress : FString();
+	TempoAddress = Settings.ClockBPMOSCAddress;
 
 	Receiver = MakeUnique<FOscuOSCReceiver>();
 	if (!Receiver->Start(Settings.BindAddress, Settings.ListenPort, Settings.AllowedSenderIPs, Settings.ReceiveBufferSize))
@@ -426,6 +455,12 @@ void UOscuOSCSubsystem::Drain()
 	{
 		// Control traffic in the reserved "/_" namespace is answered, not routed.
 		if (HandleDescribeRequest(Dispatchable))
+		{
+			continue;
+		}
+
+		// The tempo goes to the clock, which has no tag for the router to find.
+		if (OscuOSC::ApplyTempoMessage(Dispatchable, TempoAddress))
 		{
 			continue;
 		}

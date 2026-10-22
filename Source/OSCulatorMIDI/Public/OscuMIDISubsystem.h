@@ -128,6 +128,12 @@ public:
 	 */
 	int32 IngestProgramChange(int32 Channel, int32 ProgramNumber, FName Device = NAME_None);
 
+	/**
+	 * Start, Continue, Stop or Song Position, as if it came off the wire. Song Position
+	 * is in sixteenth notes and ignored for the others. Drives the clock; never a map.
+	 */
+	int32 IngestTransport(EOscuMIDITransport Transport, int32 SongPosition = 0, FName Device = NAME_None);
+
 	// ---- Output ----
 
 	/**
@@ -190,6 +196,12 @@ private:
 
 	/** The playing world, or null when only the editor is up. */
 	UWorld* FindDispatchWorld() const;
+
+	/** Transport to the clock, when the clock settings say to follow this device. */
+	void ApplyTransportToClock(FName Device, const FOscuMIDIMessage& Message);
+
+	/** The clock's BPM control change, if this is it. Does not consume the message. */
+	void ApplyTempoToClock(FName Device, const FOscuMIDIMessage& Message);
 
 	/**
 	 * Takes an already-enumerated list, because UMIDIDeviceManager::FindAllMIDIDeviceInfo

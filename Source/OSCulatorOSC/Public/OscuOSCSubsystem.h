@@ -36,6 +36,15 @@ namespace OscuOSC
 		TArray<FOscuMessage>& InOutMessages,
 		const TSet<FString>& NoCoalesceAddresses,
 		TFunctionRef<bool(const FOscuMessage&)> IsTrigger);
+
+	/**
+	 * Sets the clock's tempo from a message at Settings > Clock > BPM OSC Address: one
+	 * number, the BPM. A value under 20 means the sender has no tempo yet and is ignored.
+	 *
+	 * True when the message was that address, usable or not, so the caller answers it
+	 * here instead of routing it to an actor that is not there.
+	 */
+	OSCULATOROSC_API bool ApplyTempoMessage(const FOscuMessage& Message, const FString& TempoAddress);
 }
 
 /**
@@ -116,6 +125,7 @@ private:
 
 	/** Cached from settings so the drain does not read them per message. */
 	FString DescribeAddress;
+	FString TempoAddress;
 
 	void OpenReceiver();
 	void OpenSenders();

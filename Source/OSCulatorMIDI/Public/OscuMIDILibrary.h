@@ -7,6 +7,44 @@
 #include "OscuMIDILibrary.generated.h"
 
 /**
+ * One MIDI note, set up once and fired later with Send MIDI Note (Struct).
+ *
+ * For a Blueprint that owns a note it sends when something happens -- a pose, a
+ * collision -- so device, channel, pitch and gate length are edited in the Details
+ * panel instead of spread over pin defaults on every call site.
+ *
+ * Length is the gap between note on and the automatic note off. A receiver that
+ * samples MIDI once per frame (TouchDesigner's MIDI In CHOP) misses a note whose
+ * off lands in the same frame as its on, so keep it above one frame of the slowest
+ * receiver: 0.1 s is about six frames at 60 fps.
+ */
+USTRUCT(BlueprintType)
+struct OSCULATORMIDI_API FOscuMIDINote
+{
+	GENERATED_BODY()
+
+	/** Output device from Project Settings. "(all)" sends to every open output. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MIDI",
+		meta = (GetOptions = "OSCulatorMIDI.OscuMIDILibrary.GetMIDIOutputDeviceOptions"))
+	FName Device = TEXT("(all)");
+
+	/** 1-16, as in every DAW. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MIDI", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 Channel = 1;
+
+	/** Note number. 60 is C3 with the default Middle C Octave setting. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MIDI", meta = (ClampMin = "0", ClampMax = "127"))
+	int32 Note = 60;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MIDI", meta = (ClampMin = "1", ClampMax = "127"))
+	int32 Velocity = 127;
+
+	/** Seconds from note on to the automatic note off. 0 sends the note on only. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MIDI", meta = (ClampMin = "0.0", Units = "s"))
+	float Length = 0.1f;
+};
+
+/**
  * The Blueprint face of MIDI output.
  *
  * Channels are 1-16 throughout, matching the map asset and every DAW. No node here
@@ -36,6 +74,13 @@ public:
 	static int32 SendMIDINote(
 		UPARAM(meta = (GetOptions = "GetMIDIOutputDeviceOptions")) FName Device,
 		int32 Channel = 1, int32 Note = 60, int32 Velocity = 127, float DurationSeconds = 0.1f);
+
+	/**
+	 * Send MIDI Note with every setting taken from a MIDI Note struct: note on now,
+	 * note off after its Length. Returns how many devices took it.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "OSCulator|MIDI", meta = (DisplayName = "Send MIDI Note (Struct)"))
+	static int32 SendMIDINoteStruct(const FOscuMIDINote& Note);
 
 	UFUNCTION(BlueprintCallable, Category = "OSCulator|MIDI", meta = (DisplayName = "Send MIDI Note On"))
 	static int32 SendMIDINoteOn(

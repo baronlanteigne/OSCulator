@@ -462,6 +462,34 @@ int32 FOscuMIDIPort::Drain(const TFunctionRef<void(const FOscuMIDIMessage&)>& On
 				OnMessage(Decoded);
 				break;
 
+			case 0xF0:
+				// System messages carry no channel; the low nibble is the message itself.
+				// Only transport is read. Timing clock (0xF8) is dropped here even when the
+				// filter lets it through -- OSCulator's clock runs on its own tempo.
+				switch (Status)
+				{
+				case 0xFA: Decoded.Transport = EOscuMIDITransport::Start;    break;
+				case 0xFB: Decoded.Transport = EOscuMIDITransport::Continue; break;
+				case 0xFC: Decoded.Transport = EOscuMIDITransport::Stop;     break;
+				case 0xF2:
+					// 14 bits, least significant byte first, in sixteenth notes.
+					Decoded.Transport = EOscuMIDITransport::SongPosition;
+					Decoded.Number = (Data2 << 7) | Data1;
+					break;
+				default:
+					break;
+				}
+
+				if (Decoded.Transport != EOscuMIDITransport::None)
+				{
+					OnMessage(Decoded);
+				}
+				else
+				{
+					++UnusedMessages;
+				}
+				break;
+
 			default:
 				// Survived the filter but is not something OSCulator binds yet.
 				++UnusedMessages;

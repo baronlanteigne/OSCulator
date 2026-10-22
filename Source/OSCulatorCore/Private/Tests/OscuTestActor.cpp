@@ -157,3 +157,33 @@ void AOscuComponentHostTestActor::Ping()
 {
 	++PingCount;
 }
+
+void UOscuClockTestListener::HandleBeat(int32 Beat, int32 Bar, int32 BeatInBar)
+{
+	++BeatCount;
+	LastBeat = Beat;
+	LastBeatBar = Bar;
+	LastBeatInBar = BeatInBar;
+}
+
+void UOscuClockTestListener::HandleBar(int32 Bar)
+{
+	++BarCount;
+	LastBar = Bar;
+}
+
+void UOscuClockTestListener::HandleStart()
+{
+	++StartCount;
+}
+
+void UOscuClockTestListener::HandleStop()
+{
+	++StopCount;
+}
+
+void UOscuClockTestListener::HandlePulse(int32 Index)
+{
+	++PulseCount;
+	LastPulse = Index;
+}
