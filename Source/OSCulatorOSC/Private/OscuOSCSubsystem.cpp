@@ -38,7 +38,7 @@ namespace OscuOSC
 			return;
 		}
 
-		TMap<FString, int32> FirstIndexForAddress;
+		TMap<FString, int32> FirstIndexForKey;
 		TArray<FOscuMessage> Result;
 		Result.Reserve(InOutMessages.Num());
 
@@ -48,13 +48,23 @@ namespace OscuOSC
 
 			if (bCoalesce)
 			{
-				if (const int32* Existing = FirstIndexForAddress.Find(Message.Address))
+				// A leading string is a selector (the _mat standard: Name, Duration, Ease,
+				// Value), so /hand1/SetWeights/mat "opalShards" and "opalBright" are two
+				// separate streams that happen to share an address.
+				FString Key = Message.Address;
+				if (Message.Args.Num() > 0 && Message.Args[0].Type == EOscuValueType::String)
 				{
-					// Last value wins, at the position the address first appeared.
+					Key += TEXT("\x1F");
+					Key += Message.Args[0].Str;
+				}
+
+				if (const int32* Existing = FirstIndexForKey.Find(Key))
+				{
+					// Last value wins, at the position the key first appeared.
 					Result[*Existing] = MoveTemp(Message);
 					continue;
 				}
-				FirstIndexForAddress.Add(Message.Address, Result.Num());
+				FirstIndexForKey.Add(MoveTemp(Key), Result.Num());
 			}
 
 			Result.Add(MoveTemp(Message));

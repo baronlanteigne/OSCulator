@@ -169,3 +169,12 @@ Reference: [Clock](SETUP.md#6b-clock).
 **Explain:** Blueprint refuses an event named like an existing variable, so the event
 cannot be called `Cooldown` when a `Cooldown` variable exists. The convention used in
 this project is `SetCooldown`, and the sender's address follows: `/tag/SetCooldown`.
+
+## Many names on one address
+
+**Explain:** messages that lead with a string (`/hand1/SetWeights/mat "opalShards" 0.3`)
+coalesce per address **and** that name, so a burst of different names in one frame all
+arrive. Only repeats of the same name collapse to the last. No **No Coalesce Addresses**
+entry is needed for this; add one only if every repeat of the same name must fire.
+
+Reference: [Coalescing](SETUP.md#coalescing).

@@ -447,6 +447,35 @@ bool FOscuCoalescingTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	{
+		// The _mat standard: many streams share one address and differ by the leading
+		// string. Each name keeps its own last value; a repeated name still collapses.
+		auto Mat = [](const TCHAR* Name, double Value)
+		{
+			FOscuMessage Result;
+			Result.Address = TEXT("/hand1/SetWeights/mat");
+			Result.Args.Add(FOscuValue::MakeString(Name));
+			Result.Args.Add(FOscuValue::MakeFloat(Value));
+			return Result;
+		};
+
+		TArray<FOscuMessage> Batch = {
+			Mat(TEXT("opalShards"), 0.3),
+			Mat(TEXT("opalBright"), 0.6),
+			Mat(TEXT("opalShards"), 0.9),
+		};
+
+		OscuOSC::CoalesceBatch(Batch, {}, IsTrigger);
+
+		if (TestEqual(TEXT("Two selectors on one address both survive"), Batch.Num(), 2))
+		{
+			TestEqual(TEXT("First selector kept its position"), Batch[0].Args[0].Str, FString(TEXT("opalShards")));
+			TestEqual(TEXT("Same selector twice: last wins"), Batch[0].Args[1].AsNumber(), 0.9);
+			TestEqual(TEXT("Second selector survives"), Batch[1].Args[0].Str, FString(TEXT("opalBright")));
+			TestEqual(TEXT("Second selector kept its value"), Batch[1].Args[1].AsNumber(), 0.6);
+		}
+	}
+
 	return true;
 }
 

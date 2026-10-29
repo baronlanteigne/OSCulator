@@ -231,6 +231,12 @@ Within one frame, repeated messages to the same address collapse to the **last**
 value, at the position the address first appeared. A 60 Hz stream across 20
 parameters becomes 20 dispatches per frame rather than 1200.
 
+**A leading string is part of the key.** When the first argument is a string, the
+message coalesces per address **and** that string, so `/hand1/SetWeights/mat
+"opalShards" ...` and `"opalBright" ...` in one frame both arrive; two `"opalShards"`
+still collapse to the last. This is what the `_mat`-style `(Name, Duration, Ease,
+Value)` events need, with no **No Coalesce Addresses** entry.
+
 **Triggers never coalesce.** A function taking zero arguments fires on every hit,
 even when the sender attaches a surplus value it ignores. Use **No Coalesce
 Addresses** for anything else where every hit matters.

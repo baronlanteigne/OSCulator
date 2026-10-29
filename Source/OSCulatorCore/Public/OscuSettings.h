@@ -318,6 +318,10 @@ public:
 	/**
 	 * Addresses where every hit matters, exempted from last-wins coalescing.
 	 *
+	 * Not needed for messages that lead with a string selector (the _mat standard):
+	 * those coalesce per address AND selector, so different names on one address
+	 * never drop each other. List one here only if repeats of the same name matter.
+	 *
 	 * Zero-argument messages are never coalesced regardless of this list: a no-arg
 	 * function is a trigger, and triggers are meant to fire every time.
 	 */
