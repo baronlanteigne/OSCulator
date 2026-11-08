@@ -8,34 +8,20 @@ bi-directional interaction between multiple tools.
 
 **MIDI In Mapping: https://youtu.be/_J8eaGlQ7CE**
 
+## Road Map
+- Improved GUI for midi mapping
+- Improved tools for midi and osc out
+
 ## Key features
 
-- **Call any Blueprint event over OSC or MIDI** by tagging its actor. Several actors
-  can share a tag and all fire.
-- **MIDI note, CC and program change mapping** through a Data Asset, written
-  target-first: it lists what is controllable, then you assign inputs. **Learn**
-  captures the device, channel and input in one gesture. **Auto-Map** lists a whole
-  level's events in one click and assigns them additively, so it never disturbs
-  mappings you have already made.
-- **A span of notes can drive one event**, with the pitch's position in that span
-  becoming a value alongside velocity — and each value assigned to a function parameter
-  **by name**, not by argument order.
-- **Per-device filtering.** Each controller carries its own message-type filter and
-  its own list of channels to ignore. Anything filtered is discarded at the port.
-- **MIDI input OSCulator reads itself**, not through the engine's MIDI plugin — so clock
-  and other traffic you cannot use are dropped at the port rather than filling a queue
-  that is drained once a frame. On a running sequencer, clock alone was 68% of the wire.
-- **Send OSC and MIDI from Blueprint**, to as many destinations as you configure.
-  `Send MIDI Note` releases the note automatically after a tweakable duration, so a
-  stuck note is not one Delay node away.
-- **Self-describing.** Send `/_describe` and OSCulator replies with its whole callable
-  surface, so a patch can build its own senders instead of being told the addresses.
-- **Built for live use.** Messages are received on their own thread, coalesced to the
-  last value per address per frame, and dispatched *before* actor ticks — so a value
-  received this frame affects this frame. Measured at 0.04 ms per frame under a live
-  TouchDesigner stream. A **Performance Mode** switch turns off the editing-only
-  features once you are done authoring.
-
+- **Call any Blueprint event over OSC or MIDI** by tagging its actor.
+- In depth **MIDI input mapping** interface with MIDI Learn
+  - midi in filtering by data type or range
+  - rescaling for pitch, velocity and cc
+- **Send OSC and MIDI from Blueprint**
+  - Avoid stuck notes: `Send MIDI Note` releases the note automatically after a tweakable duration.
+  
+- **Optimized for real time use.**
 ## Quick start
 
 This repository *is* a working demo project — clone it, open `OSCulator.uproject`,
