@@ -1,6 +1,7 @@
 // Copyright Baron Lanteigne. All Rights Reserved.
 
 #include "OSCulatorCore.h"
+#include "OscuEndpointFile.h"
 #include "OscuIntrospection.h"
 #include "OscuMarshal.h"
 #include "OscuRouterSubsystem.h"
@@ -292,3 +293,8 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GOscuExportCommand(
 	TEXT("OSCulator.Export"),
 	TEXT("Writes the OSC surface to JSON. Defaults to Saved/OSCulator.json."),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&ExportCommand));
+
+static FAutoConsoleCommand GOscuReloadConfigCommand(
+	TEXT("OSCulator.ReloadConfig"),
+	TEXT("Re-reads OSCulator.ini and reopens OSC sockets and MIDI ports with its values."),
+	FConsoleCommandDelegate::CreateLambda([]() { OscuEndpointFile::Reload(); }));

@@ -94,6 +94,20 @@ bool FOscuMIDINoteOffSchedulingTest::RunTest(const FString& Parameters)
 	UOscuMIDILibrary::SendMIDINote(UOscuMIDILibrary::AllDevices, 1, 60, 127, 3600.0f);
 	TestEqual(TEXT("The Blueprint node schedules too"), UOscuMIDILibrary::GetPendingMIDINoteOffCount(), 1);
 
+	// The struct node is the same call: its Length is the duration.
+	FOscuMIDINote Note;
+	Note.Length = 3600.0f;
+	UOscuMIDILibrary::SendMIDINoteStruct(Note);
+	TestEqual(TEXT("The struct node schedules its release"), UOscuMIDILibrary::GetPendingMIDINoteOffCount(), 2);
+
+	Note.Length = 0.0f;
+	UOscuMIDILibrary::SendMIDINoteStruct(Note);
+	TestEqual(TEXT("A zero Length leaves the release to the caller"), UOscuMIDILibrary::GetPendingMIDINoteOffCount(), 2);
+
+	FOscuMIDINote Defaults;
+	TestEqual(TEXT("A new struct targets every device"), Defaults.Device, UOscuMIDILibrary::AllDevices);
+	TestTrue(TEXT("A new struct's gate outlasts a 60 fps frame"), Defaults.Length > 1.0f / 60.0f);
+
 	UOscuMIDILibrary::ReleaseAllMIDINotes();
 	TestEqual(TEXT("Release All clears it"), UOscuMIDILibrary::GetPendingMIDINoteOffCount(), 0);
 

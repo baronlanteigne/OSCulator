@@ -3,12 +3,15 @@
 #include "OscuOSCSubsystem.h"
 
 #include "OSCulatorCore.h"
+#include "OscuClockSubsystem.h"
 #include "OscuOSCReceiver.h"
 #include "OscuMarshal.h"
 #include "OscuRouterSubsystem.h"
 #include "OscuSettings.h"
 
 #include "Engine/World.h"
+#include "Misc/ScopeExit.h"
+#include "Templates/UnrealTemplate.h"
 
 // The whole game-thread cost of OSC input for one frame: draining the queue,
 // coalescing, and every dispatch it decided to make.
@@ -35,7 +38,7 @@ namespace OscuOSC
 			return;
 		}
 
-		TMap<FString, int32> FirstIndexForAddress;
+		TMap<FString, int32> FirstIndexForKey;
 		TArray<FOscuMessage> Result;
 		Result.Reserve(InOutMessages.Num());
 
@@ -45,19 +48,56 @@ namespace OscuOSC
 
 			if (bCoalesce)
 			{
-				if (const int32* Existing = FirstIndexForAddress.Find(Message.Address))
+				// A leading string is a selector (the _mat standard: Name, Duration, Ease,
+				// Value), so /hand1/SetWeights/mat "opalShards" and "opalBright" are two
+				// separate streams that happen to share an address.
+				FString Key = Message.Address;
+				if (Message.Args.Num() > 0 && Message.Args[0].Type == EOscuValueType::String)
 				{
-					// Last value wins, at the position the address first appeared.
+					Key += TEXT("\x1F");
+					Key += Message.Args[0].Str;
+				}
+
+				if (const int32* Existing = FirstIndexForKey.Find(Key))
+				{
+					// Last value wins, at the position the key first appeared.
 					Result[*Existing] = MoveTemp(Message);
 					continue;
 				}
-				FirstIndexForAddress.Add(Message.Address, Result.Num());
+				FirstIndexForKey.Add(MoveTemp(Key), Result.Num());
 			}
 
 			Result.Add(MoveTemp(Message));
 		}
 
 		InOutMessages = MoveTemp(Result);
+	}
+
+	bool ApplyTempoMessage(const FOscuMessage& Message, const FString& TempoAddress)
+	{
+		if (TempoAddress.IsEmpty() || Message.Address != TempoAddress)
+		{
+			return false;
+		}
+
+		if (Message.Args.Num() == 0)
+		{
+			UE_LOG(LogOSCulator, Warning, TEXT("'%s' sets the clock's tempo and needs one number, the BPM."), *Message.Address);
+			return true;
+		}
+
+		// TouchDesigner reads 0 off MIDI clock until clock arrives. That is no tempo, not 20 BPM.
+		const double NewBPM = Message.Args[0].AsNumber();
+		if (NewBPM < 20.0)
+		{
+			return true;
+		}
+
+		if (UOscuClockSubsystem* Clock = UOscuClockSubsystem::Get())
+		{
+			Clock->SetBPM(static_cast<float>(NewBPM));
+		}
+		return true;
 	}
 }
 
@@ -70,6 +110,14 @@ bool UOscuOSCSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 
 void UOscuOSCSubsystem::Restart()
 {
+	if (bDraining)
+	{
+		bRestartPending = true;
+		UE_LOG(LogOSCulator, Verbose, TEXT("OSC restart requested mid-dispatch; deferred until the drain finishes."));
+		return;
+	}
+	bRestartPending = false;
+
 	// Only the receiver needs the tick hook; senders are driven by Blueprint calls.
 	if (PreActorTickHandle.IsValid())
 	{
@@ -279,6 +327,7 @@ void UOscuOSCSubsystem::OpenReceiver()
 	}
 
 	DescribeAddress = Settings.bEnableOSCOut ? Settings.DescribeAddress : FString();
+	TempoAddress = Settings.ClockBPMOSCAddress;
 
 	Receiver = MakeUnique<FOscuOSCReceiver>();
 	if (!Receiver->Start(Settings.BindAddress, Settings.ListenPort, Settings.AllowedSenderIPs, Settings.ReceiveBufferSize))
@@ -303,6 +352,8 @@ void UOscuOSCSubsystem::Deinitialize()
 		UOscuSettings::OnSettingsChanged.Remove(SettingsChangedHandle);
 		SettingsChangedHandle.Reset();
 	}
+
+	bRestartPending = false;
 
 	// Joins the receive thread and closes the socket before the world goes away.
 	Receiver.Reset();
@@ -354,6 +405,18 @@ void UOscuOSCSubsystem::HandleWorldPreActorTick(UWorld* TickingWorld, ELevelTick
 
 void UOscuOSCSubsystem::Drain()
 {
+	// Declared first so it runs last, after the guard has put bDraining back: a Restart
+	// asked for by a dispatched function runs once the whole batch is done.
+	ON_SCOPE_EXIT
+	{
+		if (!bDraining && bRestartPending)
+		{
+			bRestartPending = false;
+			Restart();
+		}
+	};
+	TGuardValue<bool> DrainingGuard(bDraining, true);
+
 	if (!Receiver.IsValid())
 	{
 		return;
@@ -402,6 +465,12 @@ void UOscuOSCSubsystem::Drain()
 	{
 		// Control traffic in the reserved "/_" namespace is answered, not routed.
 		if (HandleDescribeRequest(Dispatchable))
+		{
+			continue;
+		}
+
+		// The tempo goes to the clock, which has no tag for the router to find.
+		if (OscuOSC::ApplyTempoMessage(Dispatchable, TempoAddress))
 		{
 			continue;
 		}

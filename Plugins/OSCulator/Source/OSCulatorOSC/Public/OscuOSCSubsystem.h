@@ -22,8 +22,12 @@ namespace OscuOSC
 	 * A 60 Hz stream across 20 parameters is 1200 dispatches per frame if handled
 	 * naively; only the final value of each address can possibly matter.
 	 *
-	 * Position is taken from an address's FIRST appearance and the value from its
-	 * LAST, so relative ordering between different addresses is preserved.
+	 * When the first argument is a string it counts as part of the key: the string
+	 * selects what the message is about (the _mat standard's Name), so different
+	 * selectors on one address each keep their own last value.
+	 *
+	 * Position is taken from a key's FIRST appearance and the value from its
+	 * LAST, so relative ordering between different keys is preserved.
 	 *
 	 * Two things are never collapsed:
 	 *  - Triggers, as decided by IsTrigger. This asks about the target FUNCTION's
@@ -36,6 +40,15 @@ namespace OscuOSC
 		TArray<FOscuMessage>& InOutMessages,
 		const TSet<FString>& NoCoalesceAddresses,
 		TFunctionRef<bool(const FOscuMessage&)> IsTrigger);
+
+	/**
+	 * Sets the clock's tempo from a message at Settings > Clock > BPM OSC Address: one
+	 * number, the BPM. A value under 20 means the sender has no tempo yet and is ignored.
+	 *
+	 * True when the message was that address, usable or not, so the caller answers it
+	 * here instead of routing it to an actor that is not there.
+	 */
+	OSCULATOROSC_API bool ApplyTempoMessage(const FOscuMessage& Message, const FString& TempoAddress);
 }
 
 /**
@@ -72,7 +85,12 @@ public:
 	int32 GetTargetCount() const { return Senders.Num(); }
 	const TArray<TUniquePtr<FOscuOSCSender>>& GetSenders() const { return Senders; }
 
-	/** Closes and reopens both directions, re-reading settings. */
+	/**
+	 * Closes and reopens both directions, re-reading settings.
+	 *
+	 * Called from inside a dispatch (a Blueprint reloading OSCulator.ini, say), it is
+	 * deferred until Drain has finished with the batch.
+	 */
 	void Restart();
 
 	/**
@@ -102,11 +120,16 @@ private:
 
 	void Drain();
 
+	/** True while Drain is on the stack; a Restart then only sets bRestartPending. */
+	bool bDraining = false;
+	bool bRestartPending = false;
+
 	/** True if the message was a describe request and has been answered. */
 	bool HandleDescribeRequest(const FOscuMessage& Message);
 
 	/** Cached from settings so the drain does not read them per message. */
 	FString DescribeAddress;
+	FString TempoAddress;
 
 	void OpenReceiver();
 	void OpenSenders();

@@ -6,6 +6,7 @@
 #include "OscuMarshal.h"
 #include "OscuSettings.h"
 
+#include "Components/ActorComponent.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -23,10 +24,13 @@ namespace
 	 * Decides whether a function is exposed at all, and under what name.
 	 *
 	 * ExtraAllowedFunctions wins over everything; then FunctionPrefix, which also
-	 * strips itself from the address; then the blanket bExposeAllFunctions.
+	 * strips itself from the address; then the blanket bExposeAllFunctions, which is
+	 * reported through bOutBlanket because components honour it more narrowly.
 	 */
-	bool PassesExposurePolicy(const UFunction* Function, const UOscuSettings& Settings, FName& OutAddressName)
+	bool PassesExposurePolicy(const UFunction* Function, const UOscuSettings& Settings, FName& OutAddressName, bool& bOutBlanket)
 	{
+		bOutBlanket = false;
+
 		// Delegate signatures live in the function map but are not callable.
 		if (Function->HasAnyFunctionFlags(FUNC_Delegate))
 		{
@@ -83,7 +87,123 @@ namespace
 		}
 
 		OutAddressName = Function->GetFName();
+		bOutBlanket = true;
 		return true;
+	}
+
+	/**
+	 * Whether a function exposed on a component's class may be called through its
+	 * owner's tag.
+	 *
+	 * Narrower than the actor rule on purpose. The blanket bExposeAllFunctions already
+	 * hands the network every inherited engine function on a tagged actor; extending it
+	 * to components would add hundreds more per actor -- SetVisibility, Activate, every
+	 * PhysicsControl call -- all answering under the owner's tag. So on a component the
+	 * blanket reaches Blueprint-authored functions only. FunctionPrefix and
+	 * ExtraAllowedFunctions are explicit opt-ins and apply as written, native or not.
+	 */
+	bool IsExposedOnComponent(const FOscuFunctionBinding& Binding)
+	{
+		return !Binding.bBlanketExposure || Binding.Info.bBlueprintAuthored;
+	}
+
+	/**
+	 * Splits an address into its tag and function name. False for fewer than two
+	 * segments.
+	 *
+	 * Segments after the tag join with '_' into one function name, so /laser/Beam/Width
+	 * calls Beam_Width. That keeps a sender's grouped layout -- the prefixed parameter
+	 * pages a TouchDesigner OSC Out builds -- while the receiving side stays one function
+	 * per leaf. '_' because '/' cannot appear in a function name; the flat
+	 * /laser/Beam_Width reaches the same function.
+	 *
+	 * FNAME_Find, never FNAME_Add. Addresses arrive from the network, and minting a
+	 * new FName per unique string would let a sender grow the global name table
+	 * without bound. Every tag and function we could legitimately match was already
+	 * interned at registration, so a name that does not exist comes back None and
+	 * cannot be a hit.
+	 */
+	bool ParseAddress(const FString& Address, FName& OutTag, FName& OutFunction, FString* OutJoined = nullptr)
+	{
+		TArray<FString> Segments;
+		Address.ParseIntoArray(Segments, TEXT("/"), true);
+		if (Segments.Num() < 2)
+		{
+			return false;
+		}
+
+		OutTag = FName(*Segments[0], FNAME_Find);
+		Segments.RemoveAt(0);
+		FString Joined = FString::Join(Segments, TEXT("_"));
+		OutFunction = FName(*Joined, FNAME_Find);
+		if (OutJoined != nullptr)
+		{
+			*OutJoined = MoveTemp(Joined);
+		}
+		return true;
+	}
+
+	/**
+	 * True when the first parameter a message fills is text -- a Name, String or Text.
+	 * Only such a function can take the end of an address as an argument; see
+	 * FindLeafFallback.
+	 */
+	bool TakesLeadingText(const UFunction* Function)
+	{
+		for (TFieldIterator<FProperty> It(Function); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			const FProperty* Param = *It;
+			if (Param->HasAnyPropertyFlags(CPF_ReturnParm) || OscuMarshal::IsPureOutputParam(Param))
+			{
+				continue;
+			}
+			return Param->IsA<FNameProperty>() || Param->IsA<FStrProperty>() || Param->IsA<FTextProperty>();
+		}
+		return false;
+	}
+
+	/**
+	 * The address-leaf fallback: what to call when nothing answers the full name.
+	 *
+	 * The joined name is shortened one '_' piece at a time from the right, and the first
+	 * shorter name Answers accepts wins, with everything peeled off as the leaf. So
+	 * mat_Emissive tries mat with "Emissive", and mat_Base_Color tries mat_Base with
+	 * "Color" before mat with "Base_Color". Longest first, so the most specific function
+	 * that exists is the one called.
+	 *
+	 * Answers is expected to accept only functions whose first parameter is text. That is
+	 * the guard that keeps a typo from being "rescued" into a call with a word landing in
+	 * a float: /laser/Beam/Width/extra does not become Beam_Width(0.0).
+	 *
+	 * FNAME_Find for the same reason ParseAddress uses it, and it is also what keeps a
+	 * miss cheap: a shortened name that was never interned is skipped without walking a
+	 * single actor.
+	 */
+	bool FindLeafFallback(const FString& Joined, TFunctionRef<bool(FName)> Answers, FName& OutFunction, FString& OutLeaf)
+	{
+		int32 Split = Joined.Len();
+		for (;;)
+		{
+			Split = Joined.Find(TEXT("_"), ESearchCase::CaseSensitive, ESearchDir::FromEnd, Split);
+			if (Split <= 0)
+			{
+				// No '_' left, or only a leading one with no function name before it.
+				return false;
+			}
+			if (Split == Joined.Len() - 1)
+			{
+				// A trailing '_' leaves an empty leaf, which names nothing.
+				continue;
+			}
+
+			const FName Candidate(*Joined.Left(Split), FNAME_Find);
+			if (!Candidate.IsNone() && Answers(Candidate))
+			{
+				OutFunction = Candidate;
+				OutLeaf = Joined.Mid(Split + 1);
+				return true;
+			}
+		}
 	}
 
 	/**
@@ -214,11 +334,12 @@ namespace
 	{
 		UFunction* Function = nullptr;
 		bool bHasOutParams = false;
-		const TArray<AActor*>* Actors = nullptr;
+		const TArray<UObject*>* Objects = nullptr;
 	};
 
 	/**
-	 * Calls one function on every actor of one class.
+	 * Calls one function on every object of one class -- tagged actors, or the
+	 * components answering for them.
 	 *
 	 * The frame is allocated here rather than in the caller's loop so that each
 	 * class group's stack allocation is reclaimed when this function returns --
@@ -227,7 +348,7 @@ namespace
 	FORCENOINLINE int32 DispatchToClass(
 		UFunction* Function,
 		bool bHasOutParams,
-		const TArray<AActor*>& Actors,
+		const TArray<UObject*>& Objects,
 		const TArray<FOscuValue>& Args,
 		EOscuArgPolicy Policy)
 	{
@@ -248,13 +369,13 @@ namespace
 		if (!bHasOutParams)
 		{
 			// No out parameters means ProcessEvent only reads the frame, so one
-			// frame serves every actor of this class.
+			// frame serves every object of this class.
 			InitialiseFrame(Function, Frame);
 			OscuMarshal::FillFrame(Function, Args, Policy, Frame);
 
-			for (AActor* Actor : Actors)
+			for (UObject* Object : Objects)
 			{
-				Actor->ProcessEvent(Function, Frame);
+				Object->ProcessEvent(Function, Frame);
 				++CallCount;
 			}
 
@@ -263,12 +384,12 @@ namespace
 		else
 		{
 			// ProcessEvent writes back through out parameters, so a reused frame
-			// would carry one actor's outputs into the next actor's call.
-			for (AActor* Actor : Actors)
+			// would carry one object's outputs into the next object's call.
+			for (UObject* Object : Objects)
 			{
 				InitialiseFrame(Function, Frame);
 				OscuMarshal::FillFrame(Function, Args, Policy, Frame);
-				Actor->ProcessEvent(Function, Frame);
+				Object->ProcessEvent(Function, Frame);
 				DestroyFrame(Function, Frame);
 				++CallCount;
 			}
@@ -522,7 +643,8 @@ TSharedRef<FOscuClassExposure> UOscuRouterSubsystem::BuildClassExposure(UClass* 
 		}
 
 		FName AddressName;
-		if (!PassesExposurePolicy(Function, Settings, AddressName))
+		bool bBlanket = false;
+		if (!PassesExposurePolicy(Function, Settings, AddressName, bBlanket))
 		{
 			continue;
 		}
@@ -554,6 +676,8 @@ TSharedRef<FOscuClassExposure> UOscuRouterSubsystem::BuildClassExposure(UClass* 
 		FOscuFunctionBinding Binding;
 		Binding.Function = Function;
 		Binding.Info = MoveTemp(Info);
+		Binding.bBlanketExposure = bBlanket;
+		Binding.bTakesAddressLeaf = TakesLeadingText(Function);
 		Exposure->ByAddressName.Add(AddressName, MoveTemp(Binding));
 	}
 
@@ -570,16 +694,9 @@ bool UOscuRouterSubsystem::IsTriggerAddress(const FString& Address) const
 		return *Cached;
 	}
 
-	TArray<FString> Segments;
-	Address.ParseIntoArray(Segments, TEXT("/"), true);
-	if (Segments.Num() != 2)
-	{
-		return false;
-	}
-
-	const FName TagName(*Segments[0], FNAME_Find);
-	const FName FunctionName(*Segments[1], FNAME_Find);
-	if (TagName.IsNone() || FunctionName.IsNone())
+	FName TagName;
+	FName FunctionName;
+	if (!ParseAddress(Address, TagName, FunctionName) || TagName.IsNone() || FunctionName.IsNone())
 	{
 		return false;
 	}
@@ -598,7 +715,7 @@ bool UOscuRouterSubsystem::IsTriggerAddress(const FString& Address) const
 			continue;
 		}
 
-		if (const FOscuFunctionBinding* Binding = GetClassExposure(Actor->GetClass()).ByAddressName.Find(FunctionName))
+		if (const FOscuFunctionBinding* Binding = FindBindingOnActor(Actor, FunctionName))
 		{
 			const bool bIsTrigger = Binding->Info.TotalArgCount == 0 && !Binding->Info.bVariadic;
 			TriggerAddressCache.Add(Address, bIsTrigger);
@@ -664,19 +781,13 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 		return 0;
 	};
 
-	TArray<FString> Segments;
-	Message.Address.ParseIntoArray(Segments, TEXT("/"), true);
-	if (Segments.Num() != 2)
+	FName TagName;
+	FName FunctionName;
+	FString JoinedName;
+	if (!ParseAddress(Message.Address, TagName, FunctionName, &JoinedName))
 	{
 		return Reject(FString::Printf(TEXT("%s is not a /tag/function address. Ignored."), *Message.Address));
 	}
-
-	// FNAME_Find, never FNAME_Add. Addresses arrive from the network, and minting a
-	// new FName per unique string would let a sender grow the global name table
-	// without bound. Every tag and function we could legitimately match was already
-	// interned at registration, so a name that does not exist cannot be a hit.
-	const FName TagName(*Segments[0], FNAME_Find);
-	const FName FunctionName(*Segments[1], FNAME_Find);
 
 	TArray<AActor*> Actors;
 	GatherActors(TagName, Actors);
@@ -694,11 +805,112 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 		return 0;
 	}
 
-	// Group by class so the function resolves once per class rather than per actor.
-	TMap<UClass*, TArray<AActor*>> ByClass;
-	for (AActor* Actor : Actors)
+	// Decide what answers for each actor: the actor itself when its class has the
+	// function, otherwise every component of it that does. Actor first is what lets a
+	// child class override a component's behaviour by declaring the same function --
+	// the component's version is then not called, like an override that does not call
+	// its parent. Grouped by class so the function resolves once per class.
+	//
+	// bLeafOnly restricts it to bindings that take the address leaf, for the fallback.
+	TMap<UClass*, TArray<UObject*>> ByClass;
+	TArray<const AActor*> Unanswered;
+	auto CollectTargets = [this, &Actors, &ByClass, &Unanswered](const FName Name, const bool bLeafOnly)
 	{
-		ByClass.FindOrAdd(Actor->GetClass()).Add(Actor);
+		for (AActor* Actor : Actors)
+		{
+			UClass* ActorClass = Actor->GetClass();
+			if (const FOscuFunctionBinding* Binding = GetClassExposure(ActorClass).ByAddressName.Find(Name))
+			{
+				if (!bLeafOnly || Binding->bTakesAddressLeaf)
+				{
+					ByClass.FindOrAdd(ActorClass).Add(Actor);
+				}
+				else
+				{
+					Unanswered.Add(Actor);
+				}
+				continue;
+			}
+
+			bool bComponentAnswered = false;
+			for (UActorComponent* Component : Actor->GetComponents())
+			{
+				if (!IsValid(Component))
+				{
+					continue;
+				}
+
+				UClass* ComponentClass = Component->GetClass();
+				const FOscuFunctionBinding* Binding = GetClassExposure(ComponentClass).ByAddressName.Find(Name);
+				if (Binding != nullptr && IsExposedOnComponent(*Binding) && (!bLeafOnly || Binding->bTakesAddressLeaf))
+				{
+					ByClass.FindOrAdd(ComponentClass).Add(Component);
+					bComponentAnswered = true;
+				}
+			}
+
+			if (!bComponentAnswered)
+			{
+				Unanswered.Add(Actor);
+			}
+		}
+	};
+
+	// A name that was never interned cannot match anything, so it skips the walk --
+	// which would otherwise visit every component of every tagged actor to find
+	// nothing, at line rate, for a sender with a typo. It still gets the fallback.
+	if (!FunctionName.IsNone())
+	{
+		CollectTargets(FunctionName, false);
+	}
+
+	// Nothing answers the full name: try the end of the address as an argument. Only a
+	// miss gets here, so an address that resolves directly never pays for it.
+	FString Leaf;
+	if (ByClass.Num() == 0)
+	{
+		FName Shorter;
+		const bool bFoundLeaf = FindLeafFallback(JoinedName, [this, &Actors](const FName Candidate)
+		{
+			for (const AActor* Actor : Actors)
+			{
+				const FOscuFunctionBinding* Binding = FindBindingOnActor(Actor, Candidate);
+				if (Binding != nullptr && Binding->bTakesAddressLeaf)
+				{
+					return true;
+				}
+			}
+			return false;
+		}, Shorter, Leaf);
+
+		if (bFoundLeaf)
+		{
+			FunctionName = Shorter;
+			Unanswered.Reset();
+			CollectTargets(FunctionName, true);
+		}
+	}
+
+	if (ByClass.Num() > 0)
+	{
+		// Actors sharing a tag are assumed to be the same type, but nothing enforces
+		// it. Only some of them having the function is not an error.
+		for (const AActor* Actor : Unanswered)
+		{
+			UE_LOG(LogOSCulator, Verbose, TEXT("%s: %s does not expose '%s'."),
+				*Message.Address, *Actor->GetClass()->GetName(), *FunctionName.ToString());
+		}
+	}
+
+	// The leaf goes in front, where the function's leading text parameter reads it.
+	TArray<FOscuValue> LeafArgs;
+	const TArray<FOscuValue>* Args = &Message.Args;
+	if (!Leaf.IsEmpty())
+	{
+		LeafArgs.Reserve(Message.Args.Num() + 1);
+		LeafArgs.Add(FOscuValue::MakeString(Leaf));
+		LeafArgs.Append(Message.Args);
+		Args = &LeafArgs;
 	}
 
 	// Resolve and validate everything before calling anything, so a rejected
@@ -707,15 +919,12 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 	TArray<TWeakObjectPtr<UClass>> StaleClasses;
 	Targets.Reserve(ByClass.Num());
 
-	for (const TPair<UClass*, TArray<AActor*>>& Pair : ByClass)
+	for (const TPair<UClass*, TArray<UObject*>>& Pair : ByClass)
 	{
+		// Present by construction: a class only enters ByClass when its exposure had it.
 		const FOscuFunctionBinding* Binding = GetClassExposure(Pair.Key).ByAddressName.Find(FunctionName);
 		if (Binding == nullptr)
 		{
-			// Actors sharing a tag are assumed to be the same type, but nothing
-			// enforces it. Only some of them having the function is not an error.
-			UE_LOG(LogOSCulator, Verbose, TEXT("%s: %s does not expose '%s'."),
-				*Message.Address, *Pair.Key->GetName(), *FunctionName.ToString());
 			continue;
 		}
 
@@ -729,7 +938,7 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 		}
 
 		FString CountError;
-		if (!OscuMarshal::CheckArgCount(Message.Address, Binding->Info, Message.Args.Num(), Policy, CountError))
+		if (!OscuMarshal::CheckArgCount(Message.Address, Binding->Info, Args->Num(), Policy, CountError))
 		{
 			for (const TWeakObjectPtr<UClass>& Stale : StaleClasses)
 			{
@@ -741,7 +950,7 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 		FOscuResolvedTarget& Target = Targets.AddDefaulted_GetRef();
 		Target.Function = Function;
 		Target.bHasOutParams = Binding->Info.bHasOutParams;
-		Target.Actors = &Pair.Value;
+		Target.Objects = &Pair.Value;
 	}
 
 	for (const TWeakObjectPtr<UClass>& Stale : StaleClasses)
@@ -752,14 +961,16 @@ int32 UOscuRouterSubsystem::DispatchMessage(const FOscuMessage& Message, EOscuAr
 
 	if (Targets.Num() == 0)
 	{
+		// The joined name rather than FunctionName, which is None when the sender's
+		// name was never interned.
 		return Reject(FString::Printf(TEXT("%s: nothing tagged '%s' exposes '%s'. Ignored."),
-			*Message.Address, *TagName.ToString(), *FunctionName.ToString()));
+			*Message.Address, *TagName.ToString(), *(Leaf.IsEmpty() ? JoinedName : FunctionName.ToString())));
 	}
 
 	int32 TotalCalls = 0;
 	for (const FOscuResolvedTarget& Target : Targets)
 	{
-		TotalCalls += DispatchToClass(Target.Function, Target.bHasOutParams, *Target.Actors, Message.Args, Policy);
+		TotalCalls += DispatchToClass(Target.Function, Target.bHasOutParams, *Target.Objects, *Args, Policy);
 	}
 
 	return TotalCalls;
@@ -825,12 +1036,67 @@ const FOscuFunctionBinding* UOscuRouterSubsystem::FindExposedFunction(const FNam
 			continue;
 		}
 
-		// First class that has it wins. Actors sharing a tag are assumed to be the same
-		// type but nothing enforces it, and a parameter name is a fact about a
-		// signature -- if two classes disagree, dispatch already calls both and the
-		// author has a bigger problem than slot numbering.
-		if (const FOscuFunctionBinding* Binding =
-				GetClassExposure(Actor->GetClass()).ByAddressName.Find(FunctionName))
+		// First class that has it wins -- the actor's own, else a component's, the same
+		// order dispatch asks in. Actors sharing a tag are assumed to be the same type but
+		// nothing enforces it, and a parameter name is a fact about a signature -- if two
+		// classes disagree, dispatch already calls both and the author has a bigger
+		// problem than slot numbering.
+		if (const FOscuFunctionBinding* Binding = FindBindingOnActor(Actor, FunctionName))
+		{
+			return Binding;
+		}
+	}
+
+	return nullptr;
+}
+
+const FOscuFunctionBinding* UOscuRouterSubsystem::FindExposedFunctionOrLeaf(const FName Tag, const FName FunctionName, bool& bOutLeaf) const
+{
+	bOutLeaf = false;
+
+	if (const FOscuFunctionBinding* Exact = FindExposedFunction(Tag, FunctionName))
+	{
+		return Exact;
+	}
+	if (FunctionName.IsNone())
+	{
+		return nullptr;
+	}
+
+	const FOscuFunctionBinding* Found = nullptr;
+	FName Shorter;
+	FString Leaf;
+	const bool bFoundLeaf = FindLeafFallback(FunctionName.ToString(), [this, Tag, &Found](const FName Candidate)
+	{
+		Found = FindExposedFunction(Tag, Candidate);
+		return Found != nullptr && Found->bTakesAddressLeaf;
+	}, Shorter, Leaf);
+
+	if (!bFoundLeaf)
+	{
+		return nullptr;
+	}
+
+	bOutLeaf = true;
+	return Found;
+}
+
+const FOscuFunctionBinding* UOscuRouterSubsystem::FindBindingOnActor(const AActor* Actor, const FName FunctionName) const
+{
+	if (const FOscuFunctionBinding* Binding = GetClassExposure(Actor->GetClass()).ByAddressName.Find(FunctionName))
+	{
+		return Binding;
+	}
+
+	for (const UActorComponent* Component : Actor->GetComponents())
+	{
+		if (!IsValid(Component))
+		{
+			continue;
+		}
+
+		const FOscuFunctionBinding* Binding = GetClassExposure(Component->GetClass()).ByAddressName.Find(FunctionName);
+		if (Binding != nullptr && IsExposedOnComponent(*Binding))
 		{
 			return Binding;
 		}
@@ -847,7 +1113,8 @@ int32 UOscuRouterSubsystem::FindParamSlot(
 		return INDEX_NONE;
 	}
 
-	const FOscuFunctionBinding* Binding = FindExposedFunction(Tag, FunctionName);
+	bool bLeaf = false;
+	const FOscuFunctionBinding* Binding = FindExposedFunctionOrLeaf(Tag, FunctionName, bLeaf);
 	if (Binding == nullptr)
 	{
 		return INDEX_NONE;
@@ -860,6 +1127,18 @@ int32 UOscuRouterSubsystem::FindParamSlot(
 	int32 Slot = 0;
 	for (const FOscuExposedParamInfo& Param : Binding->Info.Params)
 	{
+		if (bLeaf && !Param.bOutputOnly)
+		{
+			// The leading text parameter, which the address fills. It has no slot, so
+			// asking for it by name finds nothing, and it does not advance the sum.
+			bLeaf = false;
+			if (Param.Name == ParamName)
+			{
+				return INDEX_NONE;
+			}
+			continue;
+		}
+
 		if (Param.Name == ParamName)
 		{
 			if (Param.bOutputOnly)
@@ -896,13 +1175,25 @@ bool UOscuRouterSubsystem::DescribeParams(
 	OutParams.Reset();
 	OutSlots.Reset();
 
-	const FOscuFunctionBinding* Binding = FindExposedFunction(Tag, FunctionName);
+	bool bLeaf = false;
+	const FOscuFunctionBinding* Binding = FindExposedFunctionOrLeaf(Tag, FunctionName, bLeaf);
 	if (Binding == nullptr)
 	{
 		return false;
 	}
 
 	OutParams = Binding->Info.Params;
+	if (bLeaf)
+	{
+		// Reached through the address-leaf fallback: the leading text parameter is
+		// filled from the address, so it is not one an author can assign.
+		const int32 LeafIndex = OutParams.IndexOfByPredicate(
+			[](const FOscuExposedParamInfo& Param) { return !Param.bOutputOnly; });
+		if (LeafIndex != INDEX_NONE)
+		{
+			OutParams.RemoveAt(LeafIndex);
+		}
+	}
 	AccumulateSlots(OutParams, OutSlots);
 	return true;
 }
@@ -1048,6 +1339,7 @@ TArray<FOscuExposedTagInfo> UOscuRouterSubsystem::Introspect(EOscuIntrospectFilt
 		TagInfo.Tag = Tag;
 
 		TArray<UClass*> Classes;
+		TArray<UClass*> ComponentClasses;
 		for (const TWeakObjectPtr<AActor>& Weak : TagToActors[Tag])
 		{
 			AActor* Actor = Weak.Get();
@@ -1057,6 +1349,14 @@ TArray<FOscuExposedTagInfo> UOscuRouterSubsystem::Introspect(EOscuIntrospectFilt
 			}
 			TagInfo.Actors.Add(Actor);
 			Classes.AddUnique(Actor->GetClass());
+
+			for (const UActorComponent* Component : Actor->GetComponents())
+			{
+				if (IsValid(Component))
+				{
+					ComponentClasses.AddUnique(Component->GetClass());
+				}
+			}
 		}
 
 		// A tag whose actors have all been destroyed is not worth reporting.
@@ -1070,12 +1370,17 @@ TArray<FOscuExposedTagInfo> UOscuRouterSubsystem::Introspect(EOscuIntrospectFilt
 			const FString TagString = Tag.ToString();
 
 			// Actors sharing a tag are assumed to be the same type, but nothing
-			// enforces it, so the reported surface is the union across their classes.
+			// enforces it, so the reported surface is the union across their classes --
+			// and across their components' classes, which answer under the same tag.
 			TMap<FName, FOscuExposedFunctionInfo> Merged;
-			for (UClass* Class : Classes)
+			auto MergeClass = [this, Filter, &TagString, &Merged](UClass* Class, bool bComponent)
 			{
 				for (const TPair<FName, FOscuFunctionBinding>& Pair : GetClassExposure(Class).ByAddressName)
 				{
+					if (bComponent && !IsExposedOnComponent(Pair.Value))
+					{
+						continue;
+					}
 					if (Filter == EOscuIntrospectFilter::Custom && !Pair.Value.Info.bBlueprintAuthored)
 					{
 						continue;
@@ -1089,6 +1394,18 @@ TArray<FOscuExposedTagInfo> UOscuRouterSubsystem::Introspect(EOscuIntrospectFilt
 					Info.Address = FString::Printf(TEXT("/%s/%s"), *TagString, *Pair.Key.ToString());
 					Merged.Add(Pair.Key, MoveTemp(Info));
 				}
+			};
+
+			for (UClass* Class : Classes)
+			{
+				MergeClass(Class, false);
+			}
+
+			// Components after actors, so a name both declare reports the actor's
+			// signature -- the one dispatch calls.
+			for (UClass* Class : ComponentClasses)
+			{
+				MergeClass(Class, true);
 			}
 
 			Merged.GenerateValueArray(TagInfo.Functions);

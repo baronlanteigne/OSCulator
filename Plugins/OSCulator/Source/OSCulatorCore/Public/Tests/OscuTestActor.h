@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
 #include "GameFramework/Actor.h"
 #include "OscuTestActor.generated.h"
 
@@ -51,6 +52,13 @@ public:
 	UFUNCTION()
 	void Stop();
 
+	/** No arguments; runs Hook. Lets a test act from inside a dispatch (reload mid-drain). */
+	UFUNCTION()
+	void RunHook();
+
+	/** Not reflected: plain C++ the test sets before sending the message. */
+	TFunction<void()> Hook;
+
 	/** Blueprint "Float" pins are doubles in UE5; this is the common case. */
 	UFUNCTION()
 	void SetIntensity(double Intensity);
@@ -85,6 +93,14 @@ public:
 	 *  argument. The distinction is the whole reason IsPureOutputParam exists. */
 	UFUNCTION()
 	void Accumulate(UPARAM(ref) float& Running);
+
+	/** Answers the nested /laser/Beam/Width as well as the flat /laser/Beam_Width. */
+	UFUNCTION()
+	void Beam_Width(float Width);
+
+	/** Text first, so the address-leaf fallback reaches it as /laser/MatParam/<name>. */
+	UFUNCTION()
+	void MatParam(FName Name, float Duration, const TArray<float>& Values);
 
 	// ---- Must be rejected at registration ----
 
@@ -128,6 +144,12 @@ public:
 
 	UPROPERTY() float LastAccumulated = 0.0f;
 
+	UPROPERTY() float LastWidth = 0.0f;
+
+	UPROPERTY() FName LastMatName;
+	UPROPERTY() float LastMatDuration = 0.0f;
+	UPROPERTY() TArray<float> LastMatValues;
+
 	UPROPERTY() FVector LastSweepOrigin = FVector::ZeroVector;
 	UPROPERTY() float LastSweepPitch = 0.0f;
 	UPROPERTY() float LastSweepLevel = 0.0f;
@@ -148,4 +170,84 @@ public:
 
 	UPROPERTY() int32 CallCount = 0;
 	UPROPERTY() float LastAmount = 0.0f;
+};
+
+/**
+ * A component with functions of its own, reached through its owner's tag.
+ *
+ * Native, so the blanket bExposeAllFunctions does not reach it: on a component that
+ * blanket covers Blueprint-authored functions only. Tests opt it in through
+ * ExtraAllowedFunctions, which is also how they prove the default keeps it shut.
+ */
+UCLASS(NotBlueprintable, Hidden)
+class UOscuTestComponent : public UActorComponent
+{
+	GENERATED_BODY()
+
+public:
+	/** vec3(3) + float(1): the shape of a tweened move. */
+	UFUNCTION()
+	void Nudge(FVector Offset, float Duration);
+
+	/** Also declared on the host actor, which is asked first and must win. */
+	UFUNCTION()
+	void Ping();
+
+	UPROPERTY() int32 NudgeCount = 0;
+	UPROPERTY() int32 PingCount = 0;
+	UPROPERTY() FVector LastOffset = FVector::ZeroVector;
+	UPROPERTY() float LastDuration = 0.0f;
+};
+
+/** Hosts two test components, so one message is seen to reach both. */
+UCLASS(NotBlueprintable, NotPlaceable, Hidden)
+class AOscuComponentHostTestActor : public AActor
+{
+	GENERATED_BODY()
+
+public:
+	AOscuComponentHostTestActor();
+
+	/** Shadows UOscuTestComponent::Ping. */
+	UFUNCTION()
+	void Ping();
+
+	UPROPERTY() TObjectPtr<UOscuTestComponent> First;
+	UPROPERTY() TObjectPtr<UOscuTestComponent> Second;
+
+	UPROPERTY() int32 PingCount = 0;
+};
+
+/** Records what the clock broadcasts, so a test can check events rather than just state. */
+UCLASS(NotBlueprintable, Hidden)
+class UOscuClockTestListener : public UObject
+{
+	GENERATED_BODY()
+
+public:
+	UFUNCTION()
+	void HandleBeat(int32 Beat, int32 Bar, int32 BeatInBar);
+
+	UFUNCTION()
+	void HandleBar(int32 Bar);
+
+	UFUNCTION()
+	void HandleStart();
+
+	UFUNCTION()
+	void HandleStop();
+
+	UFUNCTION()
+	void HandlePulse(int32 Index);
+
+	UPROPERTY() int32 PulseCount = 0;
+	UPROPERTY() int32 LastPulse = -1;
+	UPROPERTY() int32 BeatCount = 0;
+	UPROPERTY() int32 LastBeat = -1;
+	UPROPERTY() int32 LastBeatBar = -1;
+	UPROPERTY() int32 LastBeatInBar = -1;
+	UPROPERTY() int32 BarCount = 0;
+	UPROPERTY() int32 LastBar = -1;
+	UPROPERTY() int32 StartCount = 0;
+	UPROPERTY() int32 StopCount = 0;
 };

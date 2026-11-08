@@ -3,6 +3,7 @@
 #include "OscuMIDISubsystem.h"
 
 #include "OSCulatorCore.h"
+#include "OscuClockSubsystem.h"
 #include "OscuMIDINoteName.h"
 #include "OscuMIDIPort.h"
 #include "OscuMarshal.h"
@@ -20,6 +21,8 @@
 #endif
 #include "Misc/App.h"
 #include "Misc/CoreDelegates.h"
+#include "Misc/ScopeExit.h"
+#include "Templates/UnrealTemplate.h"
 
 void UOscuMIDISubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -28,7 +31,7 @@ void UOscuMIDISubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// Devices are opened once the engine is fully up rather than here. At subsystem
 	// initialisation the MIDIDevice module may not have finished starting, and the
 	// settings object has not necessarily loaded its config yet.
-	PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddUObject(this, &UOscuMIDISubsystem::Restart);
+	PostEngineInitHandle = FCoreDelegates::GetOnPostEngineInit().AddUObject(this, &UOscuMIDISubsystem::Restart);
 
 	// ...unless the engine is already up, in which case that delegate has fired and
 	// will never fire again. This subsystem can be created late -- on first access
@@ -60,7 +63,7 @@ void UOscuMIDISubsystem::Deinitialize()
 {
 	if (PostEngineInitHandle.IsValid())
 	{
-		FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+		FCoreDelegates::GetOnPostEngineInit().Remove(PostEngineInitHandle);
 		PostEngineInitHandle.Reset();
 	}
 
@@ -75,6 +78,9 @@ void UOscuMIDISubsystem::Deinitialize()
 		FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 		TickerHandle.Reset();
 	}
+
+	// A restart still waiting on a drain must not reopen devices after this.
+	bRestartPending = false;
 
 	// Release everything before the devices close, or the hardware keeps sounding
 	// with nothing left to tell it otherwise.
@@ -102,6 +108,15 @@ void UOscuMIDISubsystem::SetActiveMap(UOscuMIDIMap* Map)
 
 void UOscuMIDISubsystem::Restart()
 {
+	if (bDraining)
+	{
+		bRestartPending = true;
+		UE_LOG(LogOSCulator, Verbose, TEXT("MIDI restart requested mid-dispatch; deferred until the drain finishes."));
+		return;
+	}
+	bRestartPending = false;
+	++RestartCount;
+
 	// Release anything sounding before the devices go away underneath it.
 	FlushPendingNoteOffs();
 
@@ -427,6 +442,15 @@ void UOscuMIDISubsystem::OpenDevices()
 				*Wanted.Name);
 		}
 
+		if (Settings.bClockFollowsMIDITransport && !Wanted.ListenFor.bTransport
+			&& Wanted.Name.Equals(Settings.ClockMIDIDevice, ESearchCase::IgnoreCase))
+		{
+			// Named as the clock's device, then told to throw transport away at the port.
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("MIDI input '%s' is the clock's MIDI Device but is not listening for transport -- tick 'Transport' under its Listen For, or the clock will never hear Start or Stop."),
+				*Wanted.Name);
+		}
+
 		FOscuMIDIPort Port;
 		FString Error;
 
@@ -461,6 +485,12 @@ void UOscuMIDISubsystem::OpenDevices()
 
 void UOscuMIDISubsystem::DrainPorts()
 {
+	// Declared first so it runs last, after the guard has put bDraining back.
+	// This guard is what keeps the nested IngestMessage's exit from restarting (and
+	// freeing Ports) mid-loop; not covered by a test, as it needs real hardware.
+	ON_SCOPE_EXIT { RunDeferredRestart(); };
+	TGuardValue<bool> DrainingGuard(bDraining, true);
+
 	for (FOscuMIDIPort& Port : Ports)
 	{
 		// The device travels with the message, because a binding may insist on one:
@@ -471,6 +501,16 @@ void UOscuMIDISubsystem::DrainPorts()
 		{
 			IngestMessage(Device, Message);
 		});
+	}
+}
+
+void UOscuMIDISubsystem::RunDeferredRestart()
+{
+	// Inside a nested drain or ingest bDraining is still true: the outermost one runs it.
+	if (!bDraining && bRestartPending)
+	{
+		bRestartPending = false;
+		Restart();
 	}
 }
 
@@ -829,9 +869,102 @@ int32 UOscuMIDISubsystem::IngestProgramChange(const int32 Channel, const int32 P
 	return IngestMessage(Device, Message);
 }
 
+int32 UOscuMIDISubsystem::IngestTransport(const EOscuMIDITransport Transport, const int32 SongPosition, const FName Device)
+{
+	FOscuMIDIMessage Message;
+	Message.Transport = Transport;
+	Message.Number = SongPosition;
+	return IngestMessage(Device, Message);
+}
+
+namespace
+{
+	/** Whether the clock takes tempo and transport from this device. */
+	bool IsClockDevice(const UOscuSettings& Settings, const FName Device)
+	{
+		return Settings.ClockMIDIDevice.IsEmpty()
+			|| Device.ToString().Equals(Settings.ClockMIDIDevice, ESearchCase::IgnoreCase);
+	}
+}
+
+void UOscuMIDISubsystem::ApplyTransportToClock(const FName Device, const FOscuMIDIMessage& Message)
+{
+	const UOscuSettings& Settings = *UOscuSettings::Get();
+	if (!Settings.bClockFollowsMIDITransport || !IsClockDevice(Settings, Device))
+	{
+		return;
+	}
+
+	UOscuClockSubsystem* Clock = UOscuClockSubsystem::Get();
+	if (Clock == nullptr)
+	{
+		return;
+	}
+
+	if (CVarOscuMIDIMonitor.GetValueOnGameThread() != 0)
+	{
+		UE_LOG(LogOSCulator, Log, TEXT("MIDI in [%s]: transport %s%s"), *Device.ToString(),
+			Message.Transport == EOscuMIDITransport::Start ? TEXT("start")
+			: Message.Transport == EOscuMIDITransport::Continue ? TEXT("continue")
+			: Message.Transport == EOscuMIDITransport::Stop ? TEXT("stop")
+			: TEXT("song position "),
+			Message.Transport == EOscuMIDITransport::SongPosition ? *FString::FromInt(Message.Number) : TEXT(""));
+	}
+
+	switch (Message.Transport)
+	{
+	case EOscuMIDITransport::Start:
+		Clock->Start();
+		break;
+	case EOscuMIDITransport::Continue:
+		Clock->Continue();
+		break;
+	case EOscuMIDITransport::Stop:
+		Clock->Stop();
+		break;
+	case EOscuMIDITransport::SongPosition:
+		// Sixteenth notes to beats. A sequencer sends this while stopped, before Continue.
+		Clock->SetPosition(Message.Number / 4.0);
+		break;
+	default:
+		break;
+	}
+}
+
+void UOscuMIDISubsystem::ApplyTempoToClock(const FName Device, const FOscuMIDIMessage& Message)
+{
+	const UOscuSettings& Settings = *UOscuSettings::Get();
+	if (!Settings.bClockBPMFromCC
+		|| Message.Type != EOscuMIDIInputType::ControlChange
+		|| Message.Channel != Settings.ClockBPMChannel
+		|| Message.Number != Settings.ClockBPMControl
+		|| !IsClockDevice(Settings, Device))
+	{
+		return;
+	}
+
+	if (UOscuClockSubsystem* Clock = UOscuClockSubsystem::Get())
+	{
+		Clock->SetBPM(Settings.ClockBPMFromCCValue(Message.Value));
+	}
+}
+
 int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessage& Message)
 {
+	// Every dispatch path comes through here (DrainPorts, Learn, tests): a Restart from
+	// a dispatched function waits until this message is done.
+	ON_SCOPE_EXIT { RunDeferredRestart(); };
+	TGuardValue<bool> DrainingGuard(bDraining, true);
+
 	++MessagesReceived;
+
+	// Transport drives the clock and nothing else: it has no channel or number a map
+	// could match, and Learn has nothing to learn from it.
+	if (Message.Transport != EOscuMIDITransport::None)
+	{
+		ApplyTransportToClock(Device, Message);
+		return 0;
+	}
 
 	const bool bIsNote = Message.Type == EOscuMIDIInputType::Note;
 
@@ -890,6 +1023,9 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 		return 0;
 	}
 #endif
+
+	// Read, not consumed: the same CC can still drive a binding.
+	ApplyTempoToClock(Device, Message);
 
 	if (ActiveMaps.Num() == 0)
 	{

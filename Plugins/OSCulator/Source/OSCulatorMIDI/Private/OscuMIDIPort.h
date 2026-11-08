@@ -7,9 +7,30 @@
 
 struct FOscuMIDIInputMessages;
 
+/**
+ * The transport messages OSCulator reads. Not a map input type: they drive the clock,
+ * not bindings, and they have no channel. Timing clock (0xF8) is deliberately absent.
+ */
+enum class EOscuMIDITransport : uint8
+{
+	None,
+	Start,
+	Continue,
+	Stop,
+
+	/** Song Position Pointer. Number carries the position in sixteenth notes. */
+	SongPosition,
+};
+
 /** One decoded message, in the terms a binding is written in. */
 struct FOscuMIDIMessage
 {
+	/**
+	 * Set for a transport message, in which case Type, Channel and Value mean nothing
+	 * and the message never reaches a map.
+	 */
+	EOscuMIDITransport Transport = EOscuMIDITransport::None;
+
 	EOscuMIDIInputType Type = EOscuMIDIInputType::Note;
 
 	/** 1-16, matching the map and every DAW. */

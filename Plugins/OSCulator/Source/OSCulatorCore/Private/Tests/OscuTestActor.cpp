@@ -26,6 +26,16 @@ void AOscuTestActor::Stop()
 	LastCalled = TEXT("Stop");
 }
 
+void AOscuTestActor::RunHook()
+{
+	++CallCount;
+	LastCalled = TEXT("RunHook");
+	if (Hook)
+	{
+		Hook();
+	}
+}
+
 void AOscuTestActor::SetIntensity(double Intensity)
 {
 	++CallCount;
@@ -94,6 +104,22 @@ void AOscuTestActor::Accumulate(float& Running)
 	Running += 1.0f;
 }
 
+void AOscuTestActor::Beam_Width(float Width)
+{
+	++CallCount;
+	LastCalled = TEXT("Beam_Width");
+	LastWidth = Width;
+}
+
+void AOscuTestActor::MatParam(FName Name, float Duration, const TArray<float>& Values)
+{
+	++CallCount;
+	LastCalled = TEXT("MatParam");
+	LastMatName = Name;
+	LastMatDuration = Duration;
+	LastMatValues = Values;
+}
+
 void AOscuTestActor::Attach(AActor* Other) {}
 void AOscuTestActor::BadArray(const TArray<float>& Values, float Trailing) {}
 void AOscuTestActor::ExecuteUbergraph_OscuTestActor(int32 EntryPoint) {}
@@ -107,4 +133,57 @@ void AOscuPreTaggedTestActor::Pulse(float Amount)
 {
 	++CallCount;
 	LastAmount = Amount;
+}
+
+void UOscuTestComponent::Nudge(FVector Offset, float Duration)
+{
+	++NudgeCount;
+	LastOffset = Offset;
+	LastDuration = Duration;
+}
+
+void UOscuTestComponent::Ping()
+{
+	++PingCount;
+}
+
+AOscuComponentHostTestActor::AOscuComponentHostTestActor()
+{
+	First = CreateDefaultSubobject<UOscuTestComponent>(TEXT("First"));
+	Second = CreateDefaultSubobject<UOscuTestComponent>(TEXT("Second"));
+}
+
+void AOscuComponentHostTestActor::Ping()
+{
+	++PingCount;
+}
+
+void UOscuClockTestListener::HandleBeat(int32 Beat, int32 Bar, int32 BeatInBar)
+{
+	++BeatCount;
+	LastBeat = Beat;
+	LastBeatBar = Bar;
+	LastBeatInBar = BeatInBar;
+}
+
+void UOscuClockTestListener::HandleBar(int32 Bar)
+{
+	++BarCount;
+	LastBar = Bar;
+}
+
+void UOscuClockTestListener::HandleStart()
+{
+	++StartCount;
+}
+
+void UOscuClockTestListener::HandleStop()
+{
+	++StopCount;
+}
+
+void UOscuClockTestListener::HandlePulse(int32 Index)
+{
+	++PulseCount;
+	LastPulse = Index;
 }

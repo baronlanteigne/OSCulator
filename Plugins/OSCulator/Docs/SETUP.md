@@ -55,9 +55,39 @@ The prefix is configurable (**Registry → Tag Prefix**, default `OSC_`).
 
 ```
 /<tag>/<FunctionName>
+/<tag>/<Group>/<Leaf>        → calls Group_Leaf
 ```
 
-Exactly two segments. No wildcards, no deeper nesting.
+Segments after the tag **join with `_`** into one function name, so `/laser/Beam/Width`
+calls `Beam_Width` and `/laser/Beam/Color/R` calls `Beam_Color_R`. That keeps a sender's
+grouped layout — the prefixed parameter pages a TouchDesigner OSC Out builds — while the
+receiving side stays one function per leaf. The flat `/laser/Beam_Width` reaches the same
+function. No wildcards.
+
+### The end of an address as an argument
+
+When **nothing** answers the full joined name, the end of it is tried as an argument. The
+name is shortened one `_` piece at a time from the right, and the first shorter function
+whose **first parameter is text** (Name, String or Text) is called with the peeled-off
+remainder in that parameter, ahead of the message's own arguments:
+
+```
+/laser/Mat/Emissive [0.5, 0, 0.7]    no Mat_Emissive anywhere  → Mat("Emissive", 0.5, 0, 0.7)
+/laser/Mat/Base_Color [...]          no Mat_Base either        → Mat("Base_Color", ...)
+```
+
+One event then serves a whole page of material parameters, each on its own address, with
+no event per parameter. Pair it with [`Resolve Material Parameter Value`](HELPERS.md) and a
+trailing array so the same event takes scalars and colours.
+
+- **The exact name always wins.** The fallback only runs on a miss, so an address that
+  resolves directly costs nothing extra.
+- **Text first is the opt-in.** A function whose first parameter is a number is never a
+  fallback target, so a typo like `/laser/Beam/Width/extra` is refused rather than calling
+  `Beam_Width` with a word where its float should be.
+- **Longest name first.** `Mat_Base_Color` tries `Mat_Base("Color")` before `Mat("Base_Color")`.
+- **The leaf counts as an argument** for argument checking, and it has no MIDI slot: a MIDI
+  binding naming `Mat_Emissive` addresses `Mat`'s *other* parameters, counted from zero.
 
 ### Which functions are exposed
 
@@ -73,6 +103,27 @@ Blueprint compiler's entire event graph behind one `int32` bytecode offset, so
 calling it with an arbitrary integer jumps into the middle of your graph.
 
 Use `OSCulator.List Custom` to see just your own Blueprint events.
+
+### Components answer for their actor
+
+A function can live on a **component** of the tagged actor rather than on the actor
+itself. Give a reusable component a `Move(FVector Target, float Duration)` event, add the
+component to any number of actor classes, tag the actors — `/laser/Move` reaches it with no
+per-actor wiring.
+
+- **The actor is asked first.** If the actor's class (a child Blueprint included) declares
+  the function, that one runs and its components are not called — the same as an override
+  that does not call its parent. Call the component from the actor's version if you want
+  both.
+- **Otherwise every component that has it is called.** Two components declaring `Move` on
+  one actor both run, the same way two actors sharing a tag both run.
+- **Only Blueprint-authored component functions are exposed** by the blanket
+  `Expose All Functions`. Extending it to components would put every inherited engine call
+  (`SetVisibility`, `Activate`, every Physics Control function) live under the owner's tag.
+  `Function Prefix` and `Extra Allowed Functions` are explicit opt-ins and apply to
+  components as written, native or not.
+- Component functions appear under the owner's tag in `OSCulator.List`, `/_describe`, and
+  MIDI Auto-Map, exactly like the actor's own.
 
 ### Parameter types
 
@@ -94,6 +145,36 @@ What each parameter type costs on the wire. Values are consumed in order.
 A parameter of any other type — an object reference, an unlisted struct — excludes the
 whole function from the registry. `OSCulator.List` prints each signature with these
 labels, so it always agrees with what the marshaller will do.
+
+### Enum parameters
+
+An enum takes one value, sent either of two ways:
+
+- **A number** is the entry's value, which for a Blueprint enum is its position in the
+  list, counting from 0. Decimals are cut off, so `2.9` is `2`. The range is not checked:
+  a number past the last entry arrives as a value the enum does not have, and what the
+  function makes of it is up to the function.
+- **A string** is the entry's name — `"OutQuad"`, or the long form `"ELTweenEase::OutQuad"`.
+  A name that matches no entry is read as a number instead, which for a word is `0`: the
+  first entry.
+
+### Missing values are zero, not your defaults
+
+Unreal applies a parameter's default only on a call node in a graph. OSCulator calls the
+function directly, so a value the message does not carry is **zero** — `0`, `false`, an
+empty name, an enum's first entry — never what the Blueprint shows as a default. Custom
+events have no input defaults to begin with.
+
+Whether that can happen depends on the transport:
+
+- **OSC** uses Strict, below: too few arguments is refused outright, so nothing runs on
+  values that were never sent.
+- **MIDI** is always lenient, because one knob rarely supplies a whole signature. Every
+  parameter it does not fill is zero — see [What the function receives](#what-the-function-receives).
+
+To have a real default, decide it inside the event: a `Select` on "is Duration 0" that
+substitutes `0.5`, for instance. Zero then means "use the default", so pick a default for
+which zero is never a value you want to send on purpose.
 
 ### Variable-length messages
 
@@ -149,6 +230,12 @@ and cannot emit none — so refusing it would make zero-argument triggers unreac
 Within one frame, repeated messages to the same address collapse to the **last**
 value, at the position the address first appeared. A 60 Hz stream across 20
 parameters becomes 20 dispatches per frame rather than 1200.
+
+**A leading string is part of the key.** When the first argument is a string, the
+message coalesces per address **and** that string, so `/hand1/SetWeights/mat
+"opalShards" ...` and `"opalBright" ...` in one frame both arrive; two `"opalShards"`
+still collapse to the last. This is what the `_mat`-style `(Name, Duration, Ease,
+Value)` events need, with no **No Coalesce Addresses** entry.
 
 **Triggers never coalesce.** A function taking zero arguments fires on every hit,
 even when the sender attaches a surplus value it ignores. Use **No Coalesce
@@ -505,7 +592,9 @@ Number** on, the note or CC number arrives first, unremapped, and the value seco
 
 Arguments are always accepted leniently: a zero-argument trigger simply ignores the
 value it is handed, and a signature wanting more than MIDI supplies gets zeroes for the
-rest.
+rest. Those are real zeroes, not the Blueprint's defaults — a tween's Duration arrives as
+`0` (instant) and its Ease as the enum's first entry. See
+[Missing values are zero, not your defaults](#missing-values-are-zero-not-your-defaults).
 
 ### Note ranges, and two values at once
 
@@ -678,6 +767,7 @@ dropdown lists **outputs only**.
 
 ```
 Send MIDI Note           (Device, Channel, Note, Velocity, Duration Seconds)
+Send MIDI Note (Struct)  (MIDI Note)
 Send MIDI Note On        (Device, Channel, Note, Velocity)
 Send MIDI Note Off       (Device, Channel, Note)
 Send MIDI Control Change (Device, Channel, Control Number, Value)
@@ -698,6 +788,134 @@ outstanding is flushed on End PIE and on shutdown. A note left on is a stuck not
 real hardware, and nothing inside Unreal can silence it afterwards.
 
 **Release All MIDI Notes** is the panic button.
+
+### The MIDI Note struct
+
+**OSCu MIDI Note** holds one note's settings — Device (the same output dropdown),
+Channel, Note, Velocity and Length — so a Blueprint that fires a note when something
+happens can expose it as one variable and edit it in the Details panel. **Send MIDI
+Note (Struct)** sends it exactly as Send MIDI Note would, with Length as the duration.
+
+A new struct sends to `(all)`, channel 1, note 60, velocity 127, Length 0.1 s.
+
+**Keep Length above one frame of the slowest receiver.** A receiver that samples MIDI
+once per frame — TouchDesigner's MIDI In CHOP — never sees a note whose off arrives
+in the same frame as its on. 0.1 s is about six frames at 60 fps. Two sends of the
+same note inside one Length each schedule their own release, so the receiver sees
+on, on, off, off.
+
+---
+
+## 6b. Clock
+
+**Project Settings → Plugins → OSCulator → Clock**
+
+A local tempo clock: beats and bars at a BPM, counted in Unreal. It runs **alongside**
+your DAW's clock, not slaved to it — it never reads MIDI clock (0xF8). From MIDI it
+takes only transport and, optionally, tempo:
+
+| MIDI in | Clock |
+|---|---|
+| Start | Start from beat 0 |
+| Stop | Stop, holding the position |
+| Continue | Run from the held position |
+| Song Position | Move to that position (sixteenth notes ÷ 4 = beats) |
+| The BPM CC (optional) | Set BPM: 0–127 maps to BPM Min–BPM Max |
+
+Tempo can also come over OSC; see **Tempo over OSC** below.
+
+The two clocks drift apart slowly if left running; every Start or Continue lines them
+up again. That is the trade for not reading clock: no 24-per-beat message stream to
+flood the input queue, and no jittery tempo estimate.
+
+**Setup:** tick **Transport** under the sending device's **Listen For**. Leave **Clock**
+unticked — OSCulator drops it anyway. **MIDI Device** limits transport and tempo to one
+input; empty takes them from any.
+
+**Tempo over MIDI.** MIDI has no tempo message apart from clock, so the sender maps
+its BPM onto one control change. With the default BPM Min 60 and BPM Max 187, each CC
+step is exactly one BPM (CC 60 = 120 BPM). The CC still reaches your map assets.
+
+**Tempo over OSC.** Send one number, the BPM, to **BPM OSC Address** (`/clock/SetBPM`
+by default). Use it when something else already knows the tempo, such as TouchDesigner
+reading it off MIDI clock. The message goes to the clock, not to a tagged actor. A value
+under 20 is ignored, because TouchDesigner reads 0 until clock arrives. Round the value
+before sending: a tempo worked out from MIDI clock wobbles by a few hundredths. Clear the
+address to turn this off.
+
+**Quartz clock.** For sample-accurate sound the clock owns one Quartz clock per game
+world, named by **Quartz Clock** (`Main` by default). It is made when play starts,
+before any actor's BeginPlay, and removed at world cleanup. It follows the tempo and Beats
+Per Bar, restarts from 0 on every Start, and keeps running while transport is stopped, so
+queued sounds never hang. Quartz can't jump to a fractional position, so after a Continue
+or Set Position it restarts on the next beat (beats line up), then again on the next
+point where every division lines up (12 beats in 4/4). Those restarts happen on the
+first frame after the beat, so they can be up to a frame late. Use **Play On Pulse**, or
+**Get Quartz Clock** with Play Quantized. Never make your own Quartz clock. Set Quartz
+Clock to None to turn this off.
+
+**Watching it.** `OSCulator.ClockMonitor 1` logs start, stop and tempo changes;
+`OSCulator.ClockMonitor 2` also logs every beat, counted from 1 like a DAW shows it.
+
+**Real time, not game time.** Pause, global time dilation and slow motion do not
+affect it. Position is worked out from the time since the last tempo change rather
+than added up per frame, so it does not drift with frame rate.
+
+**It runs at engine level**, like MIDI output: transport that arrives while only the
+editor is open still starts it, so a clock your DAW started before you pressed Play is
+already in phase. **Start With Play** starts it from beat 0 when play begins, unless it
+is already running; a clock started that way stops when play ends.
+
+### Blueprint
+
+`Get Engine Subsystem (OSCu Clock Subsystem)`, then:
+
+```
+Start / Stop / Continue / Set Position (Beats)
+Set BPM / Set Beats Per Bar
+Get BPM, Is Running
+Get Position        -> beats, fractional (2.5 = halfway through the third beat)
+Get Beat, Get Bar, Get Beat In Bar   -> whole numbers, counting from 0
+Get Beat Phase, Get Bar Phase        -> 0-1
+On Beat (Beat, Bar, Beat In Bar)     On Bar (Bar)
+On Start / On Stop / On BPM Changed (BPM)
+
+Get Pulse Index (Division)           -> whole pulses since beat 0, from 0
+Get Pulse Phase (Division)           -> 0-1 through the current pulse
+Get Seconds Per Pulse (Division)     Get Beats Per Pulse (Division)
+Get Quartz Clock (World Context)     -> this world's Quartz clock handle
+Play On Pulse (Audio Component, Division, Delegate) -> true if it queued the sound
+```
+
+**Play On Pulse can be called every frame.** In Unreal, playing an audio component again
+cancels the sound it has queued, so a stepper calling Play Quantized on each step can
+cancel nearly every sound before its pulse arrives. Play On Pulse ignores a call, and
+returns false, while that component's last sound is still waiting for its pulse or still
+sounding. So a burst of calls inside one pulse makes one sound on that pulse. Once the
+sound has finished, or a pulse plus 50 ms has passed, the next call plays again.
+
+Everything counts from 0: a DAW's bar 1, beat 1 is Bar 0, Beat In Bar 0.
+
+**Divisions** are Quartz's own `EQuartzCommandQuantization`: 1/32 to Whole, dotted,
+triplets, Beat and Bar. Beat is a quarter note, as Quartz counts it in x/4; Bar is Beats
+Per Bar beats; Tick is a 1/32. Pulses count from beat 0, not from each bar, so a dotted
+1/8 runs straight across bar lines. That's Quartz's Transport Relative, and Play On Pulse
+uses it, so a sound and a Pulse component on the same Division hit the same pulse.
+
+### OSCu Pulse component
+
+Add **OSCu Pulse** to any actor for an event on every pulse: **Division**, **Offset**
+(0–1 of one pulse; 0.5 fires halfway between, so two effects at one rate interlace) and
+**Enabled**. **On Pulse (Index)** fires once per pulse, with the same rules as On Beat:
+up to a frame late, only the latest pulse after a hitch, nothing while stopped. Start
+fires pulse 0 at once; Continue mid-pulse waits for the next one. **Get Phase** is 0–1
+through the current pulse, Offset included. It's for visuals, lights, OSC/DMX and logic;
+for sound, use Play On Pulse.
+
+**Events land on the first frame after the beat**, so up to a frame late. After a
+hitch that skipped several beats, On Beat fires once, for the latest beat, and On Bar
+fires if a bar line was crossed — a burst of stale beats in one frame helps nobody.
+Start fires bar 0 and beat 0 immediately.
 
 ---
 

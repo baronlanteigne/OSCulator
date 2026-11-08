@@ -7,8 +7,14 @@
 #include "OscuOSCCodec.h"
 #include "OscuOSCSender.h"
 #include "OscuOSCSubsystem.h"
+#include "OscuSettings.h"
+#include "Tests/OscuTestActor.h"
+#include "Tests/OscuTestWorld.h"
 
 #include "Common/UdpSocketBuilder.h"
+#include "Engine/World.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/ScopeExit.h"
 #include "IPAddress.h"
 #include "Misc/AutomationTest.h"
 #include "SocketSubsystem.h"
@@ -441,6 +447,119 @@ bool FOscuCoalescingTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	{
+		// The _mat standard: many streams share one address and differ by the leading
+		// string. Each name keeps its own last value; a repeated name still collapses.
+		auto Mat = [](const TCHAR* Name, double Value)
+		{
+			FOscuMessage Result;
+			Result.Address = TEXT("/hand1/SetWeights/mat");
+			Result.Args.Add(FOscuValue::MakeString(Name));
+			Result.Args.Add(FOscuValue::MakeFloat(Value));
+			return Result;
+		};
+
+		TArray<FOscuMessage> Batch = {
+			Mat(TEXT("opalShards"), 0.3),
+			Mat(TEXT("opalBright"), 0.6),
+			Mat(TEXT("opalShards"), 0.9),
+		};
+
+		OscuOSC::CoalesceBatch(Batch, {}, IsTrigger);
+
+		if (TestEqual(TEXT("Two selectors on one address both survive"), Batch.Num(), 2))
+		{
+			TestEqual(TEXT("First selector kept its position"), Batch[0].Args[0].Str, FString(TEXT("opalShards")));
+			TestEqual(TEXT("Same selector twice: last wins"), Batch[0].Args[1].AsNumber(), 0.9);
+			TestEqual(TEXT("Second selector survives"), Batch[1].Args[0].Str, FString(TEXT("opalBright")));
+			TestEqual(TEXT("Second selector kept its value"), Batch[1].Args[1].AsNumber(), 0.6);
+		}
+	}
+
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// A Restart asked for from inside a dispatched function waits for the drain
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuNetRestartDeferredTest,
+	"OSCulator.OSC.Net.RestartDuringDrainIsDeferred",
+	OscuNetTest::Flags)
+
+bool FOscuNetRestartDeferredTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuNetTest;
+
+	// Also restarts the real MIDI subsystem (it hears OnSettingsChanged too).
+	UOscuSettings* Settings = GetMutableDefault<UOscuSettings>();
+	const int32 SavedPort = Settings->ListenPort;
+	const TArray<FString> SavedAllowed = Settings->AllowedSenderIPs;
+
+	// Declared before the world, so it runs after the world is gone.
+	ON_SCOPE_EXIT
+	{
+		Settings->ListenPort = SavedPort;
+		Settings->AllowedSenderIPs = SavedAllowed;
+		// A live PIE world restarted along with ours must not keep the test port and open allow-list.
+		UOscuSettings::OnSettingsChanged.Broadcast();
+	};
+
+	// Ephemeral port to start; loopback must not be filtered out by the project's list.
+	Settings->ListenPort = 0;
+	Settings->AllowedSenderIPs.Reset();
+
+	OscuTest::FScopedTestWorld Scope(/*bEnableOSCInput*/ true);
+	AOscuTestActor* Laser = Scope.SpawnTaggedAs<AOscuTestActor>({ TEXT("OSC_laser") });
+	Scope.BeginPlay();
+
+	UOscuOSCSubsystem* OSC = UOscuOSCSubsystem::Get(Scope.World);
+	if (!TestNotNull(TEXT("The OSC subsystem exists"), OSC) || !TestTrue(TEXT("Listening"), OSC->IsListening()))
+	{
+		return false;
+	}
+	const int32 OldPort = OSC->GetListenPort();
+	const int32 NewPort = OldPort == 47124 ? 47125 : 47124;
+
+	int32 PortDuringHook = -1;
+	bool bListeningDuringHook = false;
+	Laser->Hook = [&]()
+	{
+		Settings->ListenPort = NewPort;
+		UOscuSettings::OnSettingsChanged.Broadcast();
+		PortDuringHook = OSC->GetListenPort();
+		bListeningDuringHook = OSC->IsListening();
+	};
+
+	FOscuMessage Message;
+	Message.Address = TEXT("/laser/RunHook");
+	TArray<uint8> Bytes;
+	if (!TestTrue(TEXT("Serialize succeeded"), OscuOSCCodec::Serialize(Message, Bytes)))
+	{
+		return false;
+	}
+	FScopedSender Sender;
+	if (!TestTrue(TEXT("Datagram sent"), Sender.SendTo(OldPort, Bytes)))
+	{
+		return false;
+	}
+
+	// Drive the subsystem's drain the way a world tick does, until the hook has run.
+	const double Deadline = FPlatformTime::Seconds() + 5.0;
+	while (Laser->LastCalled != FName(TEXT("RunHook")) && FPlatformTime::Seconds() < Deadline)
+	{
+		FWorldDelegates::OnWorldPreActorTick.Broadcast(Scope.World, LEVELTICK_All, 0.0f);
+		FPlatformProcess::Sleep(0.005f);
+	}
+
+	if (!TestEqual(TEXT("The hook was dispatched"), Laser->LastCalled, FName(TEXT("RunHook"))))
+	{
+		return false;
+	}
+	TestEqual(TEXT("During the drain: still on the old socket (restart deferred)"), PortDuringHook, OldPort);
+	TestTrue(TEXT("During the drain: still listening"), bListeningDuringHook);
+	TestTrue(TEXT("After the drain: listening"), OSC->IsListening());
+	TestEqual(TEXT("After the drain: the deferred restart ran on the new port"), OSC->GetListenPort(), NewPort);
 	return true;
 }
 
