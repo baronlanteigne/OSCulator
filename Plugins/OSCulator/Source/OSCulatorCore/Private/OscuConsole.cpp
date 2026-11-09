@@ -5,6 +5,7 @@
 #include "OscuIntrospection.h"
 #include "OscuMarshal.h"
 #include "OscuRouterSubsystem.h"
+#include "OscuSettings.h"
 #include "OscuValue.h"
 
 #include "Engine/World.h"
@@ -75,7 +76,8 @@ namespace
 		UOscuRouterSubsystem* Router = UOscuRouterSubsystem::Get(World);
 		if (Router == nullptr)
 		{
-			Line(Ar, TEXT("[OSCulator] No router for this world. The registry only exists in PIE and packaged builds."));
+			Line(Ar, TEXT("[OSCulator] No router for this world. The registry exists in PIE, in a packaged build, "
+				"and in the editor world -- but not in a preview or thumbnail world."));
 		}
 		return Router;
 	}
@@ -108,13 +110,35 @@ namespace
 			}
 		}
 
+		// The editor world never runs OnWorldBeginPlay, so its registry is only ever
+		// filled by something asking for it -- and asking IS this command. Without the
+		// scan, List outside play reported an empty level that was not empty, and told
+		// the user to enter play to fix a problem play does not fix.
+		const bool bEditorWorld = World != nullptr && World->WorldType == EWorldType::Editor;
+		if (bEditorWorld)
+		{
+			Router->ScanWorld();
+		}
+
 		const TArray<FOscuExposedTagInfo> Tags = Router->Introspect(Filter, TagFilter);
 
 		if (Tags.Num() == 0)
 		{
-			Line(Ar, TagFilter.IsNone()
-				? TEXT("[OSCulator] Nothing registered. Tag an actor 'OSC_something' and re-enter play.")
-				: *FString::Printf(TEXT("[OSCulator] No tag '%s' in the registry."), *TagFilter.ToString()));
+			if (!TagFilter.IsNone())
+			{
+				Line(Ar, FString::Printf(TEXT("[OSCulator] No tag '%s' in the registry."), *TagFilter.ToString()));
+			}
+			else if (bEditorWorld)
+			{
+				const FOscuScanReport& Scan = Router->GetLastScan();
+				Line(Ar, FString::Printf(
+					TEXT("[OSCulator] Nothing registered. %d actor(s) walked, %d tagged with something not prefixed '%s'."),
+					Scan.ActorsScanned, Scan.ActorsWithUnprefixedTags, *UOscuSettings::Get()->TagPrefix));
+			}
+			else
+			{
+				Line(Ar, TEXT("[OSCulator] Nothing registered. Tag an actor 'OSC_something' and re-enter play."));
+			}
 			return;
 		}
 
@@ -151,6 +175,44 @@ namespace
 					*Function.Address, *FormatArgCount(Function), *FormatParams(Function)));
 			}
 		}
+	}
+
+	/**
+	 * Forget the registry and look at the level again.
+	 *
+	 * The scan already ran on every Auto-Map and Validate click, but only from inside
+	 * the MIDI map asset -- so there was no way to ask "what do you see right now?"
+	 * without editing something. This is that question, and it reports what it declined
+	 * as well as what it took.
+	 */
+	void RescanCommand(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
+	{
+		UOscuRouterSubsystem* Router = ResolveSubsystem(World, Ar);
+		if (Router == nullptr)
+		{
+			return;
+		}
+
+		Router->ScanWorld();
+
+		const FOscuScanReport& Scan = Router->GetLastScan();
+		Line(Ar, FString::Printf(
+			TEXT("[OSCulator] Rescanned: %d actor(s) walked, %d carrying a prefixed tag, %d tag(s) registered."),
+			Scan.ActorsScanned, Scan.ActorsTagged, Router->GetNumTags()));
+
+		if (Router->GetNumTags() == 0)
+		{
+			Line(Ar, FString::Printf(
+				TEXT("[OSCulator] %d actor(s) are tagged with something that is not prefixed '%s' -- check Registry > Tag Prefix."),
+				Scan.ActorsWithUnprefixedTags, *UOscuSettings::Get()->TagPrefix));
+		}
+
+		for (const FString& Entry : Scan.TaggedOnlyOnClassDefaults)
+		{
+			Line(Ar, FString::Printf(TEXT("[OSCulator] not inherited by the instance: %s"), *Entry));
+		}
+
+		Line(Ar, TEXT("[OSCulator] Run 'OSCulator.List Custom' to see the callable surface."));
 	}
 
 	void SendCommand(const TArray<FString>& Args, UWorld* World, FOutputDevice& Ar)
@@ -281,6 +343,11 @@ static FAutoConsoleCommandWithWorldArgsAndOutputDevice GOscuListCommand(
 	TEXT("  OSCulator.List Actors   tags and their actors, no functions\n")
 	TEXT("  OSCulator.List <tag>    one tag in full"),
 	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&ListCommand));
+
+static FAutoConsoleCommandWithWorldArgsAndOutputDevice GOscuRescanCommand(
+	TEXT("OSCulator.Rescan"),
+	TEXT("Rebuilds the registry from the open level and reports what it saw. Works outside play."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&RescanCommand));
 
 static FAutoConsoleCommandWithWorldArgsAndOutputDevice GOscuSendCommand(
 	TEXT("OSCulator.Send"),

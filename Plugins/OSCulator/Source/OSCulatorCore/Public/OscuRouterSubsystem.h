@@ -41,6 +41,50 @@ struct FOscuClassExposure
 };
 
 /**
+ * What a world scan walked past, for the callers that have to explain themselves.
+ *
+ * "I tagged it and nothing appeared in the mapper" has several causes that look
+ * identical from the outside: no prefixed tag in the level at all, a mistyped prefix, a
+ * tag whose actors expose nothing drivable, or a tag that lives on a Blueprint's class
+ * defaults and never reached the actor already placed in the level. A scan that only
+ * filled a map could not tell them apart, so it now also records what it declined.
+ */
+struct FOscuScanReport
+{
+	/** Every actor the iterator visited, tagged or not. */
+	int32 ActorsScanned = 0;
+
+	/** Actors that contributed at least one prefixed tag. */
+	int32 ActorsTagged = 0;
+
+	/**
+	 * Actors that carry tags, none of them prefixed.
+	 *
+	 * A level with several of these and none of ours is almost always a prefix that
+	 * does not match what was typed on the actors -- which is otherwise indistinguishable
+	 * from having forgotten to tag anything.
+	 */
+	int32 ActorsWithUnprefixedTags = 0;
+
+	/**
+	 * Actors whose CLASS DEFAULTS carry a prefixed tag that the placed instance does not.
+	 *
+	 * The engine only pushes a changed default onto an instance that still agrees with
+	 * the old one, so an actor placed before the tag existed keeps the Tags array it
+	 * serialised -- and that copy is what a scan reads. The tag is on the Blueprint and
+	 * not on the thing in the level. Reloading the level re-reads it from the class,
+	 * which is why restarting the editor looks like the fix.
+	 *
+	 * Reported rather than silently merged: an instance whose tag was removed on purpose
+	 * is indistinguishable from one that never inherited it, and quietly answering for
+	 * both would make a deliberate exclusion impossible to express.
+	 */
+	TArray<FString> TaggedOnlyOnClassDefaults;
+
+	void Reset() { *this = FOscuScanReport(); }
+};
+
+/**
  * Maps tags to actors, and classes to their callable surface.
  *
  * A world subsystem rather than a game-instance one, so it dies cleanly with each
@@ -59,11 +103,19 @@ public:
 
 	static UOscuRouterSubsystem* Get(const UWorld* World);
 
-	/** Adds an actor under each of its prefixed tags. Safe to call twice. */
-	void RegisterActor(AActor* Actor);
+	/**
+	 * Adds an actor under each of its prefixed tags. Safe to call twice.
+	 *
+	 * Returns how many prefixed tags it registered, which is zero for most actors in
+	 * most levels. The caller uses it to tell "not ours" apart from "ours and broken".
+	 */
+	int32 RegisterActor(AActor* Actor);
 
 	/** Rebuilds the whole registry from a fresh actor sweep. */
 	void ScanWorld();
+
+	/** What the last ScanWorld walked past. See FOscuScanReport. */
+	const FOscuScanReport& GetLastScan() const { return LastScan; }
 
 	/**
 	 * Live actors under a tag, compacting away any that have been destroyed.
@@ -196,6 +248,15 @@ public:
 private:
 	void OnActorSpawned(AActor* Actor);
 
+	/**
+	 * Drops an actor from every tag it answers under.
+	 *
+	 * The counterpart RegisterActor never needed while the only way into the registry
+	 * was a full rescan. Editing an actor's Tags in the editor is an edit in both
+	 * directions, and re-registering alone would leave a removed tag answering.
+	 */
+	void UnregisterActor(const AActor* Actor);
+
 	/** The binding an actor answers a function with: its own class first, then the
 	 *  first of its components that exposes it. Null when neither does. */
 	const FOscuFunctionBinding* FindBindingOnActor(const AActor* Actor, FName FunctionName) const;
@@ -227,6 +288,9 @@ private:
 
 	FDelegateHandle ActorSpawnedHandle;
 
+	/** Filled by ScanWorld, read by whoever has to report why a level looks empty. */
+	FOscuScanReport LastScan;
+
 	/** Addresses already complained about, so a rejected 60 Hz stream costs one log
 	 *  line rather than sixty a second. Bounded, because these are network input. */
 	TSet<FString> ReportedBadAddresses;
@@ -257,7 +321,22 @@ private:
 	 */
 	void HandleObjectsReinstanced(const TMap<UObject*, UObject*>& ReplacementMap);
 
+	/**
+	 * Re-registers an actor whose Tags were edited in the details panel.
+	 *
+	 * The editor world never runs OnWorldBeginPlay, so for a long time the only thing
+	 * that put an actor into the registry there was a full rescan -- which only the MIDI
+	 * map asset's buttons ever asked for. Typing a tag onto an actor and expecting the
+	 * mapper to notice is the obvious thing to do, and it did not work.
+	 *
+	 * Narrow on purpose: this delegate fires for every property edit in the editor, so
+	 * it early-outs on anything that is not an AActor in this world with its Tags array
+	 * touched.
+	 */
+	void HandleActorPropertyChanged(UObject* Object, struct FPropertyChangedEvent& Event);
+
 	FDelegateHandle CDOCompiledHandle;
 	FDelegateHandle ObjectsReinstancedHandle;
+	FDelegateHandle ActorPropertyChangedHandle;
 #endif
 };

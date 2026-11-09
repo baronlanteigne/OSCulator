@@ -48,6 +48,13 @@ The prefix is stripped, so this actor answers at `/laser/<FunctionName>`.
   function, only those fire — that is not an error.
 - Tags set in a Blueprint's **Class Defaults** work for runtime-spawned actors.
   A tag added by gameplay code *after* spawning arrives too late to register.
+- ⚠️ A tag added to **Class Defaults** does not reliably reach an actor **already placed**
+  in the level. The engine only pushes a changed default onto an instance that still
+  agrees with the old one, so a placed actor keeps the `Tags` array it serialised — and
+  that copy is what gets scanned. Reopening the level re-reads it from the class, which
+  is why restarting the editor looks like the fix. **Add the tag on the actor in the
+  level instead**, or delete and re-place it. `Auto-Map From Level`,
+  `Validate Against Level` and `OSCulator.Rescan` all name any actor in this state.
 
 The prefix is configurable (**Registry → Tag Prefix**, default `OSC_`).
 
@@ -727,6 +734,29 @@ rewritten. This matters more than it sounds: a Blueprint class's function map do
 iterate in a stable order across recompiles, so anything that rewrote rows would
 reshuffle which pad triggers what every time you compiled — and you would find out
 mid-show. Functions are merged alphabetically for the same reason.
+
+#### "I tagged a new Blueprint and nothing appeared"
+
+Every click prints a **level inventory** before it merges anything, so the answer is in
+the log whether or not a row was added:
+
+```
+OSCulatorMIDIMap: level inventory -- 3 tag(s) from 4 tagged actor(s), 812 actor(s) walked.
+    laser                     2 actor(s)   7 mappable function(s)   [BP_Laser_C_1, BP_Laser_C_2]
+    cube                      1 actor(s)   4 mappable function(s)   [BP_Cube_C_0]
+    scenes                    1 actor(s)   0 mappable function(s)   [BP_Scenes_C_0]
+```
+
+| What the log says | Cause | Fix |
+| --- | --- | --- |
+| `nothing in this level carries a 'OSC_' tag`, with a count of actors tagged with something else | The prefix does not match what is typed on the actors | **Registry → Tag Prefix**, or retype the tag |
+| the tag is listed with **0 mappable functions** and `<BP> has uncompiled changes` | A custom event added and not compiled lives on the Blueprint's *skeleton* class; the actor in the level is an instance of the generated one, which is what gets walked | **Compile the Blueprint**, then click again. This is the one that made restarting the editor look like the fix — loading the asset fresh compiles it |
+| the tag is listed with **0 mappable functions** and `<BP> is compiled` | It authors no events, or their parameters cannot be marshalled | Search the log for `skipped:` — each rejected function says why. See [Which functions are exposed](#which-functions-are-exposed) and [Parameter types](#parameter-types) |
+| `these actors carry a prefixed tag on their class defaults that the placed instance did not inherit` | The tag is on the Blueprint, not on the actor in the level | Add it on the actor, or delete and re-place it. See [Tag it](#tag-it) |
+| the tag is not listed at all, and none of the above | The actor is not in the scanned level — an unloaded World Partition cell, an unloaded data layer, or another level entirely | Load it, then click again |
+
+Outside the asset, `OSCulator.Rescan` and `OSCulator.List Custom` ask the same question
+from the console, and both work without entering play.
 
 ### Validate and Prune
 

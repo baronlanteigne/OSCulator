@@ -10,6 +10,7 @@
 #include "OscuSettings.h"
 
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/ScopeExit.h"
 #include "Templates/UnrealTemplate.h"
 
@@ -26,8 +27,34 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("Messages drained"), STAT_OscuDrained, STATGROUP
 DECLARE_DWORD_COUNTER_STAT(TEXT("Messages coalesced away"), STAT_OscuCoalescedAway, STATGROUP_OSCulator);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Messages dispatched"), STAT_OscuDispatched, STATGROUP_OSCulator);
 
+/**
+ * Prints incoming OSC as it is dispatched. The OSC counterpart of OSCulator.MIDIMonitor.
+ *
+ * Two levels rather than one on/off, because the obvious version is unusable at the
+ * rate this is built for: a line per message at 10-20 messages a frame is a wall of
+ * identical text, and the thing you are nearly always looking for is "did the address I
+ * am sending ever arrive, and did it reach anything". That is level 1 -- the first
+ * message on each distinct address and nothing more -- and it costs a set lookup at
+ * line rate. Level 2 is for a single gesture, with the stream otherwise idle.
+ *
+ * Read on the game thread and used in the DRAIN, never on the receive thread: a log
+ * call there would put formatting and a file write between two reads of a UDP socket.
+ */
+static TAutoConsoleVariable<int32> CVarOscuOSCMonitor(
+	TEXT("OSCulator.OSCMonitor"),
+	0,
+	TEXT("0 off. 1 logs the first message seen on each distinct address. 2 logs every message dispatched."),
+	ECVF_Default);
+
 namespace OscuOSC
 {
+	/** Host-order uint32 to dotted quad. See FOscuMessage::SourceIP. */
+	FString DescribeSender(uint32 IP)
+	{
+		return FString::Printf(TEXT("%u.%u.%u.%u"),
+			(IP >> 24) & 0xFF, (IP >> 16) & 0xFF, (IP >> 8) & 0xFF, IP & 0xFF);
+	}
+
 	void CoalesceBatch(
 		TArray<FOscuMessage>& InOutMessages,
 		const TSet<FString>& NoCoalesceAddresses,
@@ -126,6 +153,11 @@ void UOscuOSCSubsystem::Restart()
 	}
 	Receiver.Reset();
 	CloseSenders();
+
+	// A restart means the socket, the port or the allowlist changed, so what has been
+	// seen on which address is no longer a fact about the current setup.
+	MonitoredAddresses.Reset();
+	bMonitorCapHit = false;
 
 	OpenReceiver();
 	OpenSenders();
@@ -461,23 +493,96 @@ void UOscuOSCSubsystem::Drain()
 	INC_DWORD_STAT_BY(STAT_OscuCoalescedAway, BeforeCoalescing - Batch.Num());
 	INC_DWORD_STAT_BY(STAT_OscuDispatched, Batch.Num());
 
+	const int32 MonitorLevel = CVarOscuOSCMonitor.GetValueOnGameThread();
+	if (MonitorLevel != LastMonitorLevel)
+	{
+		LastMonitorLevel = MonitorLevel;
+		MonitoredAddresses.Reset();
+		bMonitorCapHit = false;
+	}
+
+	// Said once per frame rather than per message, and only at level 2. It matters
+	// because a coalesced message never reaches a function at all: without this, the
+	// monitor printing one value while the sender sent sixty reads as a lost message.
+	if (MonitorLevel > 1 && BeforeCoalescing > Batch.Num())
+	{
+		UE_LOG(LogOSCulator, Log, TEXT("OSC in: %d message(s) coalesced away this frame."),
+			BeforeCoalescing - Batch.Num());
+	}
+
 	for (const FOscuMessage& Dispatchable : Batch)
 	{
+		// Asked before the branches below, so one message cannot be judged new by one
+		// of them and old by another.
+		const bool bMonitor = MonitorLevel > 0 && ShouldMonitor(MonitorLevel, Dispatchable.Address);
+
 		// Control traffic in the reserved "/_" namespace is answered, not routed.
 		if (HandleDescribeRequest(Dispatchable))
 		{
+			if (bMonitor)
+			{
+				UE_LOG(LogOSCulator, Log, TEXT("OSC in%s: %s   -> answered, not routed   from %s"),
+					MonitorLevel > 1 ? TEXT("") : TEXT(" (new address)"),
+					*Dispatchable.ToLogString(), *OscuOSC::DescribeSender(Dispatchable.SourceIP));
+			}
 			continue;
 		}
 
 		// The tempo goes to the clock, which has no tag for the router to find.
 		if (OscuOSC::ApplyTempoMessage(Dispatchable, TempoAddress))
 		{
+			if (bMonitor)
+			{
+				UE_LOG(LogOSCulator, Log, TEXT("OSC in%s: %s   -> clock tempo   from %s"),
+					MonitorLevel > 1 ? TEXT("") : TEXT(" (new address)"),
+					*Dispatchable.ToLogString(), *OscuOSC::DescribeSender(Dispatchable.SourceIP));
+			}
 			continue;
 		}
 
 		// Strict: OSC senders know the signature, so a wrong count is a mistake
 		// worth naming rather than papering over.
-		Router->DispatchMessage(Dispatchable, EOscuArgPolicy::Strict);
+		//
+		// OutError is deliberately still null: the router's own rejection logging is
+		// throttled to one line per distinct address, and taking the error here to
+		// print it would turn that into a line per message. The monitor says how many
+		// actors answered; the router says why none did, once.
+		const int32 Called = Router->DispatchMessage(Dispatchable, EOscuArgPolicy::Strict);
 		++MessagesDispatched;
+
+		if (bMonitor)
+		{
+			UE_LOG(LogOSCulator, Log, TEXT("OSC in%s: %s   -> %d actor(s)   from %s"),
+				MonitorLevel > 1 ? TEXT("") : TEXT(" (new address)"),
+				*Dispatchable.ToLogString(), Called, *OscuOSC::DescribeSender(Dispatchable.SourceIP));
+		}
 	}
+}
+
+bool UOscuOSCSubsystem::ShouldMonitor(const int32 Level, const FString& Address)
+{
+	if (Level > 1)
+	{
+		return true;
+	}
+
+	if (MonitoredAddresses.Contains(Address))
+	{
+		return false;
+	}
+
+	if (MonitoredAddresses.Num() >= 128)
+	{
+		if (!bMonitorCapHit)
+		{
+			bMonitorCapHit = true;
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("OSC monitor has printed 128 distinct addresses and will print no more. "
+					 "Use OSCulator.OSCMonitor 2 for every message, or 0 then 1 to start the list over."));
+		}
+		return false;
+	}
+
+	MonitoredAddresses.Add(Address);
+	return true;
 }

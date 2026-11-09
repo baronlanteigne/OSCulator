@@ -9,17 +9,31 @@
 #include "OscuRouterSubsystem.h"
 #include "OscuSettings.h"
 
+#include "GameFramework/Actor.h"
+
 #if WITH_EDITOR
 #include "Editor.h"
+#include "Engine/Blueprint.h"
 #endif
 
 namespace
 {
-	/** Device is deliberately absent: it is matched leniently at dispatch, not keyed. */
+	/**
+	 * Device is deliberately absent: it is matched leniently at dispatch, not keyed.
+	 *
+	 * Both note kinds collapse to ONE key. A note arrives off the wire as a note and
+	 * knows nothing about whether the row it should reach is a single note or a span --
+	 * so if the two kinds keyed separately, every incoming note would need two lookups
+	 * and every caller would have to remember to do both. A range already registers
+	 * once per note it covers, so sharing the key makes a span and a single note match
+	 * through exactly the same path.
+	 */
 	uint32 MakeLookupKey(uint8 Channel, EOscuMIDIInputType Type, int32 Number)
 	{
+		const EOscuMIDIInputType Keyed = OscuIsNoteType(Type) ? EOscuMIDIInputType::Note : Type;
+
 		return static_cast<uint32>(Channel) << 16
-			| static_cast<uint32>(Type) << 8
+			| static_cast<uint32>(Keyed) << 8
 			| static_cast<uint32>(static_cast<uint8>(Number));
 	}
 
@@ -28,6 +42,7 @@ namespace
 		switch (Type)
 		{
 		case EOscuMIDIInputType::Note:          return TEXT("note");
+		case EOscuMIDIInputType::NoteRange:     return TEXT("notes");
 		case EOscuMIDIInputType::ControlChange:  return TEXT("CC");
 		default:                                 return TEXT("program");
 		}
@@ -150,9 +165,10 @@ bool UOscuMIDIMap::AssignDefaultValueParams(FOscuMIDIBinding& Binding, const TAr
 
 	Binding.VelocityParam = Continuous[0];
 
-	// Pitch only for a note-driven row. A controller has no pitch, so naming one would
-	// put a constant in a parameter and hide the field that explains where it came from.
-	if (Continuous.Num() > 1 && Binding.Type == EOscuMIDIInputType::Note)
+	// Pitch only for a SPAN. A single note has no position in one, so pointing pitch at
+	// a parameter there would put the same number in it on every hit -- which is the
+	// state Single Note and Note Range exist to tell apart.
+	if (Continuous.Num() > 1 && Binding.Type == EOscuMIDIInputType::NoteRange)
 	{
 		Binding.PitchParam = Continuous[1];
 	}
@@ -169,6 +185,7 @@ void UOscuMIDIMap::PostLoad()
 	// source held the authored copy would otherwise have every controller row silently
 	// become a note row, reinterpreting CC 7 as note 7.
 	MigrateSourceTypesToBindings();
+	MigrateNoteRanges();
 	Refresh();
 }
 
@@ -222,6 +239,55 @@ void UOscuMIDIMap::UpdateLearnArming()
 	}
 }
 #endif // WITH_EDITOR
+
+void UOscuMIDIMap::MigrateNoteRanges()
+{
+	int32 Promoted = 0;
+	int32 PitchCleared = 0;
+
+	for (FOscuMIDIBinding& Binding : Bindings)
+	{
+		if (Binding.Type != EOscuMIDIInputType::Note)
+		{
+			continue;
+		}
+
+		// ANY span makes the row a span. A row carrying one span and one single note was
+		// always really a span; the single note lives on inside it as a one-note span,
+		// which GetPitchFraction already handles by reporting 0.
+		const bool bWasRange = Binding.Sources.ContainsByPredicate(
+			[](const FOscuMIDISource& Source) { return Source.bNoteRange; });
+
+		if (bWasRange)
+		{
+			Binding.Type = EOscuMIDIInputType::NoteRange;
+			++Promoted;
+			continue;
+		}
+
+		// Stays a single note, so its pitch assignment was the broken case: no span
+		// means no position, so it sent Pitch Out Min on every hit. Cleared rather than
+		// left hidden, so the asset says what it does.
+		if (!Binding.PitchParam.IsNone())
+		{
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("%s: %s/%s is a Single Note row, so its Pitch -> %s could only ever send the same "
+					 "number. Cleared. Set the row to Note Range if a span was what you meant."),
+				*GetName(), *Binding.Tag.ToString(), *Binding.FunctionName.ToString(),
+				*Binding.PitchParam.ToString());
+
+			Binding.PitchParam = NAME_None;
+			++PitchCleared;
+		}
+	}
+
+	if (Promoted > 0 || PitchCleared > 0)
+	{
+		UE_LOG(LogOSCulator, Log,
+			TEXT("%s: %d row(s) became Note Range, %d pitch assignment(s) cleared from Single Note rows."),
+			*GetName(), Promoted, PitchCleared);
+	}
+}
 
 void UOscuMIDIMap::Refresh()
 {
@@ -286,7 +352,7 @@ void UOscuMIDIMap::ResolveNoteNames()
 	{
 		for (FOscuMIDISource& Source : Binding.Sources)
 		{
-			if (Source.Type != EOscuMIDIInputType::Note)
+			if (!OscuIsNoteType(Source.Type))
 			{
 				continue;
 			}
@@ -308,7 +374,7 @@ void UOscuMIDIMap::ResolveNoteNames()
 					*Source.Note, *Error, Source.ResolvedNote);
 			}
 
-			if (!Source.bNoteRange)
+			if (!Source.IsNoteRange())
 			{
 				continue;
 			}
@@ -406,7 +472,7 @@ void UOscuMIDIMap::RebuildSummaries()
 			{
 				Text = FString::Printf(TEXT("CC    ch %d  #%d"), Source.Channel, Source.ControlNumber);
 			}
-			else if (Source.bNoteRange)
+			else if (Source.IsNoteRange())
 			{
 				Text = FString::Printf(TEXT("Notes ch %d  %s (%d) - %s (%d)  [%d notes]"),
 					Source.Channel, *Source.Note, Source.ResolvedNote,
@@ -617,15 +683,19 @@ int32 UOscuMIDIMap::MergeFunctions(const FName Tag, const TArray<FName>& Functio
 			continue;
 		}
 
-		if (Binding->Type == EOscuMIDIInputType::ProgramChange)
+		if (Binding->Type == EOscuMIDIInputType::ProgramChange
+			|| Binding->Type == EOscuMIDIInputType::NoteRange)
 		{
-			// Left entirely alone. A program change is never something to GUESS from a
-			// signature -- it is a deliberate "patch 7 fires this" -- and the auto-map
-			// rule describes a first note and a first CC, with nothing to say about
-			// programs. Overwriting the type here would also undo the choice.
+			// Left entirely alone. Neither kind is something to GUESS from a signature --
+			// a program change is a deliberate "patch 7 fires this", and a span is a
+			// deliberate "these notes sweep it". The auto-map rule describes a first note
+			// and a first CC, with nothing to say about either. Overwriting the type here
+			// would also undo the choice.
 			UE_LOG(LogOSCulator, Log,
-				TEXT("%s: '%s' is set to Program Change, so auto-map left it for you to number."),
-				*GetName(), *FunctionName.ToString());
+				TEXT("%s: '%s' is set to %s, so auto-map left it for you to assign."),
+				*GetName(), *FunctionName.ToString(),
+				Binding->Type == EOscuMIDIInputType::ProgramChange
+					? TEXT("Program Change") : TEXT("Note Range"));
 			continue;
 		}
 
@@ -819,10 +889,10 @@ UOscuMIDIMap::FOscuMIDIValidation UOscuMIDIMap::Validate(UWorld* World)
 			for (int32 Number = Source.GetNoteLow(); Number <= Source.GetNoteHigh(); ++Number)
 			{
 				ByInput.FindOrAdd(MakeLookupKey(Source.Channel, Source.Type,
-						Source.Type == EOscuMIDIInputType::Note ? Number : Source.GetNumber()))
+						OscuIsNoteType(Source.Type) ? Number : Source.GetNumber()))
 					.Add(FString::Printf(TEXT("%s/%s"), *Binding.Tag.ToString(), *Binding.FunctionName.ToString()));
 
-				if (Source.Type != EOscuMIDIInputType::Note)
+				if (!OscuIsNoteType(Source.Type))
 				{
 					break;
 				}
@@ -907,6 +977,156 @@ UOscuMIDIMap::FOscuMIDIValidation UOscuMIDIMap::Validate(UWorld* World)
 
 #if WITH_EDITOR
 
+namespace
+{
+	/**
+	 * The Blueprint behind a class, when it has edits that are not compiled in yet.
+	 *
+	 * This is the one failure that looked like a plugin bug and is not. A custom event
+	 * added and not compiled lives on the SKELETON class; the actor in the level is an
+	 * instance of the GENERATED one, which is what gets walked here. So the function is
+	 * invisible until a compile moves it across -- and loading the asset fresh compiles
+	 * it, which is exactly why restarting the editor appeared to be the fix.
+	 *
+	 * Empty for a native class, and for a Blueprint that is up to date.
+	 */
+	FString FindStaleBlueprintName(const UClass* Class)
+	{
+#if WITH_EDITORONLY_DATA
+		if (Class != nullptr)
+		{
+			if (const UBlueprint* Blueprint = Cast<UBlueprint>(Class->ClassGeneratedBy.Get()))
+			{
+				if (!Blueprint->IsUpToDate())
+				{
+					return Blueprint->GetName();
+				}
+			}
+		}
+#endif
+		return FString();
+	}
+
+	/** "BP_Laser_2, BP_Laser_3", capped so one tag on forty actors stays readable. */
+	FString DescribeActors(const FOscuExposedTagInfo& TagInfo)
+	{
+		TArray<FString> Names;
+		for (const TWeakObjectPtr<AActor>& Weak : TagInfo.Actors)
+		{
+			if (const AActor* Actor = Weak.Get())
+			{
+				Names.Add(Actor->GetName());
+			}
+			if (Names.Num() == 4)
+			{
+				Names.Add(FString::Printf(TEXT("+%d more"), TagInfo.Actors.Num() - 4));
+				break;
+			}
+		}
+		return FString::Join(Names, TEXT(", "));
+	}
+
+	/**
+	 * Says what the level actually offers, before anything is merged into the asset.
+	 *
+	 * Exists because "+0 binding(s) listed" was the whole answer to four different
+	 * problems -- nothing tagged, a prefix that does not match the tags, a tag whose
+	 * Blueprint is not compiled, and a tag whose instance never inherited it from its
+	 * class defaults -- and gave no way to tell which one you had. A click that found
+	 * nothing should say what it looked at.
+	 */
+	void ReportLevelInventory(const UOscuMIDIMap& Map, const UOscuRouterSubsystem& Router,
+		const TArray<FOscuExposedTagInfo>& Tags)
+	{
+		const FOscuScanReport& Scan = Router.GetLastScan();
+		const FString& Prefix = UOscuSettings::Get()->TagPrefix;
+
+		UE_LOG(LogOSCulator, Log,
+			TEXT("%s: level inventory -- %d tag(s) from %d tagged actor(s), %d actor(s) walked."),
+			*Map.GetName(), Tags.Num(), Scan.ActorsTagged, Scan.ActorsScanned);
+
+		for (const FOscuExposedTagInfo& TagInfo : Tags)
+		{
+			UE_LOG(LogOSCulator, Log, TEXT("    %-24s %2d actor(s)  %2d mappable function(s)   [%s]"),
+				*TagInfo.Tag.ToString(), TagInfo.Actors.Num(), TagInfo.Functions.Num(), *DescribeActors(TagInfo));
+		}
+
+		if (Tags.Num() == 0)
+		{
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("%s: nothing in this level carries a '%s' tag, so there is nothing to map. "
+					 "%d actor(s) walked; %d of them are tagged with something that is not prefixed '%s'. "
+					 "The prefix is Project Settings > Plugins > OSCulator > Registry > Tag Prefix."),
+				*Map.GetName(), *Prefix, Scan.ActorsScanned, Scan.ActorsWithUnprefixedTags, *Prefix);
+		}
+
+		// A tag that registered but offers nothing. Almost always an uncompiled
+		// Blueprint, which is the one cause a user cannot see from the panel.
+		for (const FOscuExposedTagInfo& TagInfo : Tags)
+		{
+			if (TagInfo.Functions.Num() > 0)
+			{
+				continue;
+			}
+
+			TArray<FString> Stale;
+			TArray<FString> Fresh;
+			for (const TWeakObjectPtr<AActor>& Weak : TagInfo.Actors)
+			{
+				const AActor* Actor = Weak.Get();
+				if (Actor == nullptr)
+				{
+					continue;
+				}
+
+				const FString StaleName = FindStaleBlueprintName(Actor->GetClass());
+				if (!StaleName.IsEmpty())
+				{
+					Stale.AddUnique(StaleName);
+				}
+				else
+				{
+					Fresh.AddUnique(Actor->GetClass()->GetName());
+				}
+			}
+
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("%s: tag '%s' has %d actor(s) but no Blueprint-authored function that MIDI can drive."),
+				*Map.GetName(), *TagInfo.Tag.ToString(), TagInfo.Actors.Num());
+
+			if (Stale.Num() > 0)
+			{
+				UE_LOG(LogOSCulator, Warning,
+					TEXT("    %s has uncompiled changes. A function added since the last compile is not on the class yet -- "
+						 "compile the Blueprint and click Auto-Map again."),
+					*FString::Join(Stale, TEXT(", ")));
+			}
+			if (Fresh.Num() > 0)
+			{
+				UE_LOG(LogOSCulator, Warning,
+					TEXT("    %s is compiled, so either it authors no events, or its parameters cannot be marshalled. "
+						 "Search this log for 'skipped:' to see the reason each function was turned down."),
+					*FString::Join(Fresh, TEXT(", ")));
+			}
+		}
+
+		// The tag is on the Blueprint and not on the thing in the level.
+		if (Scan.TaggedOnlyOnClassDefaults.Num() > 0)
+		{
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("%s: these actors carry a prefixed tag on their class defaults that the placed instance did not inherit:"),
+				*Map.GetName());
+			for (const FString& Entry : Scan.TaggedOnlyOnClassDefaults)
+			{
+				UE_LOG(LogOSCulator, Warning, TEXT("    %s"), *Entry);
+			}
+			UE_LOG(LogOSCulator, Warning,
+				TEXT("    Add the tag on the actor in the level, or delete and re-place it. Reopening the level "
+					 "re-reads Tags from the class, which is why restarting the editor looks like the fix."));
+		}
+	}
+}
+
 int32 UOscuMIDIMap::AutoMapFromWorld(UWorld* World)
 {
 	UOscuRouterSubsystem* Router = UOscuRouterSubsystem::Get(World);
@@ -923,6 +1143,10 @@ int32 UOscuMIDIMap::AutoMapFromWorld(UWorld* World)
 	// Blueprint-authored only. A fully exposed actor drags in a couple of hundred
 	// inherited engine functions, and offering those as pads would be absurd.
 	const TArray<FOscuExposedTagInfo> Tags = Router->Introspect(EOscuIntrospectFilter::Custom);
+
+	// Before the merge, not after: what the level offers is the answer to "why did
+	// nothing appear", and it is true whether anything was added or not.
+	ReportLevelInventory(*this, *Router, Tags);
 
 	int32 TotalAdded = 0;
 	int32 TotalAssigned = 0;

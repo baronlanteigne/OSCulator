@@ -2,17 +2,18 @@
 
 Open the console with `` ` `` (backtick).
 
-Most commands need a **playing world** (PIE or packaged), because the registry and the
-transports live there. The two exceptions are marked **editor too** — they work
-without entering play.
+Most commands need a **playing world** (PIE or packaged), because the transports live
+there. The ones marked **editor too** work without entering play.
 
 ---
 
 ## Discovering what is callable
 
-### `OSCulator.List`
+### `OSCulator.List` — editor too
 
-Everything exposed, grouped by tag. With `Expose All Functions` on this includes a
+Everything exposed, grouped by tag. Outside play it **rescans the open level first**, so
+it always answers about the level as it is right now rather than as it was when
+something last looked. With `Expose All Functions` on this includes a
 couple of hundred inherited engine functions per actor.
 
 ```
@@ -36,6 +37,28 @@ Tags and the actors under them, no functions. Answers "is my tag registered at a
 ### `OSCulator.List <tag>`
 
 One tag in full. `OSCulator.List laser`.
+
+### `OSCulator.Rescan` — editor too
+
+Forgets the registry and walks the open level again, then says what it saw — including
+what it declined.
+
+```
+[OSCulator] Rescanned: 812 actor(s) walked, 4 carrying a prefixed tag, 3 tag(s) registered.
+[OSCulator] Run 'OSCulator.List Custom' to see the callable surface.
+```
+
+The editor world never runs `BeginPlay`, so nothing there populates the registry on its
+own schedule. Dragging in a tagged actor and editing an actor's **Tags** both update it
+live now, but this is the explicit "look again" for everything else — a Blueprint you
+just compiled, a level you just streamed in.
+
+Two lines only appear when something is wrong:
+
+| Line | Means |
+| --- | --- |
+| `N actor(s) are tagged with something that is not prefixed 'OSC_'` | Nothing matched, but the level *is* tagged. Almost always **Registry → Tag Prefix** against what is typed on the actors |
+| `not inherited by the instance: <actor> -- 'OSC_x' is on the class defaults only` | The tag is on the Blueprint, not on the actor in the level. See [Tagging](SETUP.md#tag-it) |
 
 ### `OSCulator.Export [path]`
 
@@ -90,6 +113,55 @@ Usually a typo or a tag that is not on any actor.
 
 If it says *enabled but NOT listening*, the bind failed — the log says why, usually
 another application on the port.
+
+### `OSCulator.OSCMonitor 0|1|2`
+
+Prints incoming OSC as it is dispatched. The OSC counterpart of `OSCulator.MIDIMonitor`.
+
+| | |
+| --- | --- |
+| `0` | off, and the default |
+| `1` | the **first** message on each distinct address, and nothing after it |
+| `2` | every message |
+
+```
+OSC in (new address): /laser/Fire 0 0 1 "burst" 0.5   -> 2 actor(s)   from 192.168.1.40
+OSC in (new address): /cube/Spin 0.5                  -> 1 actor(s)   from 192.168.1.40
+OSC in (new address): /laser/Fyre 1                   -> 0 actor(s)   from 192.168.1.40
+```
+
+**Use `1`.** It answers the question you nearly always have — *did the address I am
+sending ever arrive, and did it reach anything* — and it costs one set lookup per
+message, so it is safe to leave on while you work. `2` is for a single gesture with the
+stream otherwise idle: at 10–20 messages a frame it is a wall of identical lines that
+buries the one address you were looking for.
+
+`-> 0 actor(s)` means it arrived and routed to nothing. The monitor does not say why —
+the router already does, **once per distinct address**, and repeating it per message is
+exactly what the throttle exists to prevent. The reason is in the log above, and the
+address is also listed under *arrived but matched nothing* in `OSCulator.Status`.
+
+Three outcomes other than a count:
+
+| | |
+| --- | --- |
+| `-> answered, not routed` | the reserved `/_` namespace, e.g. `/_describe` |
+| `-> clock tempo` | the address configured as the clock's tempo input |
+| `N message(s) coalesced away this frame` | level `2` only, once per frame |
+
+That last line matters: a coalesced message never reaches a function at all, so the
+monitor printing one value where the sender sent sixty is coalescing working, not a lost
+message. See [Coalescing](SETUP.md#coalescing).
+
+Toggling it off and back on starts the level `1` address list over. The list is capped at
+128 distinct addresses, after which it says so once and stops — addresses arrive from the
+network, and a sender sweeping a generated address would otherwise grow it for the life
+of the process.
+
+Logged in the **drain**, on the game thread, never on the receive thread: a log call
+between two reads of a UDP socket is how a queue overflows.
+
+Off by default. Leave it off during a show.
 
 ---
 

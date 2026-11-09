@@ -21,6 +21,28 @@
 namespace
 {
 	/**
+	 * True when a tag carries the configured prefix. OutRemainder is what follows it.
+	 *
+	 * Shared because the scan asks this of a Blueprint's CLASS DEFAULTS exactly as
+	 * RegisterActor asks it of the placed instance, and two copies of a prefix rule is
+	 * one copy too many -- the second one is the one that drifts.
+	 *
+	 * An empty remainder is reported as a match so the caller can complain about a bare
+	 * tag rather than silently treating it as somebody else's.
+	 */
+	bool MatchesTagPrefix(const FName Tag, const FString& Prefix, FString& OutRemainder)
+	{
+		const FString TagString = Tag.ToString();
+		if (!Prefix.IsEmpty() && !TagString.StartsWith(Prefix, ESearchCase::IgnoreCase))
+		{
+			return false;
+		}
+
+		OutRemainder = Prefix.IsEmpty() ? TagString : TagString.RightChop(Prefix.Len());
+		return true;
+	}
+
+	/**
 	 * Decides whether a function is exposed at all, and under what name.
 	 *
 	 * ExtraAllowedFunctions wins over everything; then FunctionPrefix, which also
@@ -54,6 +76,21 @@ namespace
 		// can carry the function without the flag; the name is what the Blueprint
 		// compiler always generates.
 		if (Function->HasAnyFunctionFlags(FUNC_UbergraphFunction) || Name.StartsWith(TEXT("ExecuteUbergraph")))
+		{
+			return false;
+		}
+
+		// Compiler-generated, not authored. These live on the BlueprintGeneratedClass
+		// exactly like a custom event, so "Blueprint-authored" cannot tell them apart --
+		// and offering them is noise at best: UserConstructionScript reruns the
+		// construction script, and a timeline's internal callbacks are plumbing nobody
+		// means to reach over the network. Filtered by name because that is the only
+		// thing that distinguishes them.
+		if (Name == TEXT("UserConstructionScript")
+			|| Name.EndsWith(TEXT("__UpdateFunc"))
+			|| Name.EndsWith(TEXT("__FinishedFunc"))
+			|| Name.EndsWith(TEXT("__EventFunc"))
+			|| Name.EndsWith(TEXT("__DirectionFunc")))
 		{
 			return false;
 		}
@@ -443,6 +480,23 @@ void UOscuRouterSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 	ObjectsReinstancedHandle = FCoreUObjectDelegates::OnObjectsReinstanced.AddUObject(
 		this, &UOscuRouterSubsystem::HandleObjectsReinstanced);
+
+	// The editor world never runs OnWorldBeginPlay, which is where a game world picks
+	// up its spawn handler -- so for the editor these have to be hooked at init or the
+	// registry can only ever change when something calls ScanWorld. That used to be the
+	// MIDI map asset's three buttons and nothing else, which is why dragging in a tagged
+	// actor and expecting the mapper to see it did not work.
+	//
+	// Loading a level does not go through SpawnActor, so the spawn handler is for what
+	// the user does next: drag, paste, duplicate.
+	if (UWorld* World = GetWorld(); World != nullptr && World->WorldType == EWorldType::Editor)
+	{
+		ActorSpawnedHandle = World->AddOnActorSpawnedHandler(
+			FOnActorSpawned::FDelegate::CreateUObject(this, &UOscuRouterSubsystem::OnActorSpawned));
+
+		ActorPropertyChangedHandle = FCoreUObjectDelegates::OnObjectPropertyChanged.AddUObject(
+			this, &UOscuRouterSubsystem::HandleActorPropertyChanged);
+	}
 #endif
 }
 
@@ -458,6 +512,11 @@ void UOscuRouterSubsystem::Deinitialize()
 	{
 		FCoreUObjectDelegates::OnObjectsReinstanced.Remove(ObjectsReinstancedHandle);
 		ObjectsReinstancedHandle.Reset();
+	}
+	if (ActorPropertyChangedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(ActorPropertyChangedHandle);
+		ActorPropertyChangedHandle.Reset();
 	}
 #endif
 
@@ -491,9 +550,14 @@ void UOscuRouterSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 	ScanWorld();
 
-	// Actors spawned after this point join the registry as they appear.
-	ActorSpawnedHandle = InWorld.AddOnActorSpawnedHandler(
-		FOnActorSpawned::FDelegate::CreateUObject(this, &UOscuRouterSubsystem::OnActorSpawned));
+	// Actors spawned after this point join the registry as they appear. Guarded because
+	// the editor path takes this handler at init; a world is one or the other, but a
+	// second registration would deliver every spawn twice.
+	if (!ActorSpawnedHandle.IsValid())
+	{
+		ActorSpawnedHandle = InWorld.AddOnActorSpawnedHandler(
+			FOnActorSpawned::FDelegate::CreateUObject(this, &UOscuRouterSubsystem::OnActorSpawned));
+	}
 
 	TSet<TWeakObjectPtr<AActor>> UniqueActors;
 	for (const TPair<FName, TArray<TWeakObjectPtr<AActor>>>& Pair : TagToActors)
@@ -522,6 +586,7 @@ void UOscuRouterSubsystem::ScanWorld()
 	// this there was nothing a user could run to pick up a function they had just added
 	// or deleted. Rebuilding costs one reflection walk per class, on next use.
 	ClassExposureCache.Reset();
+	LastScan.Reset();
 
 	UWorld* World = GetWorld();
 	if (World == nullptr)
@@ -529,41 +594,103 @@ void UOscuRouterSubsystem::ScanWorld()
 		return;
 	}
 
+#if WITH_EDITOR
+	// Only the class-defaults check below needs it; a shipping build would warn on an
+	// unused local.
+	const FString& Prefix = UOscuSettings::Get()->TagPrefix;
+#endif
+
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
-		RegisterActor(*It);
+		AActor* Actor = *It;
+		++LastScan.ActorsScanned;
+
+		const int32 Registered = RegisterActor(Actor);
+		if (Registered > 0)
+		{
+			++LastScan.ActorsTagged;
+			continue;
+		}
+
+		// From here down the actor answers to nothing, and the only question left is
+		// whether it was meant to.
+		if (Actor != nullptr && Actor->Tags.Num() > 0)
+		{
+			++LastScan.ActorsWithUnprefixedTags;
+		}
+
+#if WITH_EDITOR
+		// Asked only of actors that registered nothing: one already in the registry is
+		// working, whatever its class defaults happen to say.
+		if (const AActor* Defaults = Actor != nullptr ? Actor->GetClass()->GetDefaultObject<AActor>() : nullptr)
+		{
+			for (const FName& Tag : Defaults->Tags)
+			{
+				FString Remainder;
+				if (!MatchesTagPrefix(Tag, Prefix, Remainder) || Remainder.IsEmpty())
+				{
+					continue;
+				}
+
+				// One line per actor, not per tag: the fix is the same for all of them.
+				LastScan.TaggedOnlyOnClassDefaults.Add(FString::Printf(
+					TEXT("%s (%s) -- '%s' is on the class defaults only"),
+					*Actor->GetName(), *Actor->GetClass()->GetName(), *Tag.ToString()));
+				break;
+			}
+		}
+#endif
 	}
 }
 
-void UOscuRouterSubsystem::RegisterActor(AActor* Actor)
+int32 UOscuRouterSubsystem::RegisterActor(AActor* Actor)
 {
 	if (!IsValid(Actor))
 	{
-		return;
+		return 0;
 	}
 
 	const UOscuSettings& Settings = *UOscuSettings::Get();
 	const FString& Prefix = Settings.TagPrefix;
 
+	int32 Registered = 0;
+
 	for (const FName& Tag : Actor->Tags)
 	{
-		const FString TagString = Tag.ToString();
-		if (!Prefix.IsEmpty() && !TagString.StartsWith(Prefix, ESearchCase::IgnoreCase))
+		FString Remainder;
+		if (!MatchesTagPrefix(Tag, Prefix, Remainder))
 		{
 			continue;
 		}
 
-		const FString Remainder = Prefix.IsEmpty() ? TagString : TagString.RightChop(Prefix.Len());
 		if (Remainder.IsEmpty())
 		{
 			UE_LOG(LogOSCulator, Warning, TEXT("%s carries the bare tag '%s' with nothing after the prefix. Ignored."),
-				*Actor->GetName(), *TagString);
+				*Actor->GetName(), *Tag.ToString());
 			continue;
 		}
 
 		// An actor may carry several prefixed tags and answer under all of them.
 		// FName comparison is case-insensitive, so OSC_Laser and OSC_laser agree.
 		TagToActors.FindOrAdd(FName(*Remainder)).AddUnique(Actor);
+		++Registered;
+	}
+
+	return Registered;
+}
+
+void UOscuRouterSubsystem::UnregisterActor(const AActor* Actor)
+{
+	for (auto It = TagToActors.CreateIterator(); It; ++It)
+	{
+		It.Value().RemoveAll([Actor](const TWeakObjectPtr<AActor>& Weak) { return Weak.Get() == Actor; });
+
+		// A tag nothing answers under is not registered. Leaving the empty array would
+		// make GetNumTags and OSCulator.List report a tag that cannot fire.
+		if (It.Value().Num() == 0)
+		{
+			It.RemoveCurrent();
+		}
 	}
 }
 
@@ -1252,6 +1379,45 @@ void UOscuRouterSubsystem::HandleClassRecompiled(UObject* CDO, const FObjectPost
 	// keyed on the class pointer could not notice on its own, and why the staleness
 	// survived until something explicitly forgot.
 	InvalidateClassExposure(CDO->GetClass());
+}
+
+void UOscuRouterSubsystem::HandleActorPropertyChanged(UObject* Object, FPropertyChangedEvent& Event)
+{
+	if (UOscuSettings::Get()->bPerformanceMode)
+	{
+		// Performance Mode's one question is "am I still editing?", and the answer here
+		// is no. Checked first because this delegate is the widest one we subscribe to.
+		return;
+	}
+
+	AActor* Actor = Cast<AActor>(Object);
+	if (!IsValid(Actor) || Actor->GetWorld() != GetWorld())
+	{
+		return;
+	}
+
+	// Tags and nothing else. Every other property edit in the editor would otherwise pay
+	// for a registry update that cannot change anything.
+	//
+	// Both names are checked because an array property reports differently depending on
+	// the gesture: changing an entry names the entry, adding or removing one names the
+	// array.
+	static const FName TagsPropertyName = GET_MEMBER_NAME_CHECKED(AActor, Tags);
+	const FName PropertyName = Event.GetPropertyName();
+	const FName MemberName = (Event.MemberProperty != nullptr) ? Event.MemberProperty->GetFName() : NAME_None;
+	if (PropertyName != TagsPropertyName && MemberName != TagsPropertyName)
+	{
+		return;
+	}
+
+	// A rescan of one actor rather than an addition. RegisterActor is additive by
+	// design -- an actor may answer under several tags -- so re-registering alone would
+	// leave a tag that was just DELETED still firing until the next full scan.
+	UnregisterActor(Actor);
+	const int32 Registered = RegisterActor(Actor);
+
+	UE_LOG(LogOSCulator, Verbose, TEXT("%s re-registered after a Tags edit: %d prefixed tag(s)."),
+		*Actor->GetName(), Registered);
 }
 
 void UOscuRouterSubsystem::HandleObjectsReinstanced(const TMap<UObject*, UObject*>& ReplacementMap)

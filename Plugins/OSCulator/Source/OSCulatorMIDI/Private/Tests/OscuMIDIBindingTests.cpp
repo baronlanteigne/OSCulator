@@ -5,6 +5,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "OscuSettings.h"
+#include "OscuRouterSubsystem.h"
 #include "Tests/OscuTestActor.h"
 #include "Tests/OscuTestWorld.h"
 
@@ -101,6 +102,68 @@ namespace OscuMIDIBindingTest
 
 //////////////////////////////////////////////////////////////////////////
 // Auto-map lists everything, and assigns only where a rule says how.
+
+//////////////////////////////////////////////////////////////////////////
+// Auto-Map against a real world: the scan, the inventory report, and the merge
+//
+// Every other auto-map test drives MergeFunctions directly with hand-written
+// signatures, which is the right way to test the merge rules and leaves the wiring
+// above it -- rescan the world, report what it holds, introspect, merge -- never
+// executed. That wiring is the part a user actually clicks, and the part that reads
+// CDOs and weak pointers while reporting why a level looks empty.
+
+#if WITH_EDITOR
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuMIDIAutoMapFromWorldTest,
+	"OSCulator.MIDI.AutoMapFromWorld",
+	OscuTest::Flags)
+
+bool FOscuMIDIAutoMapFromWorldTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	using namespace OscuMIDIBindingTest;
+
+	FScopedTestWorld Scope;
+
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("OSC_laser") });
+
+	// Tagged with nothing of ours. It has to reach the report and not the map: this
+	// count is what tells a mistyped prefix apart from a level nobody tagged.
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("Lighting") });
+
+	Scope.BeginPlay();
+
+	UOscuMIDIMap* Map = MakeMap();
+	const int32 Added = Map->AutoMapFromWorld(Scope.World);
+
+	// Nothing is added, and that is correct rather than a disappointment: the test
+	// actor is a NATIVE class, and auto-map only ever offers Blueprint-authored
+	// functions. So this is also the exact shape of the case the inventory report
+	// exists for -- a tag that registered and offers nothing drivable.
+	TestEqual(TEXT("A native class offers auto-map nothing"), Added, 0);
+	TestEqual(TEXT("...so no binding was written"), Map->Bindings.Num(), 0);
+
+	UOscuRouterSubsystem* Router = Scope.Router();
+	if (!TestNotNull(TEXT("Router subsystem exists"), Router))
+	{
+		return false;
+	}
+
+	// Proof the click rescanned rather than answering from whatever was already there.
+	const FOscuScanReport& Scan = Router->GetLastScan();
+	TestEqual(TEXT("One actor carries a prefixed tag"), Scan.ActorsTagged, 1);
+	TestEqual(TEXT("One carries a tag that is none of ours"), Scan.ActorsWithUnprefixedTags, 1);
+	TestEqual(TEXT("One tag registered"), Router->GetNumTags(), 1);
+
+	// Native classes, so none of them has a Blueprint to be out of date.
+	TestEqual(TEXT("No class-defaults-only tags among native actors"),
+		Scan.TaggedOnlyOnClassDefaults.Num(), 0);
+
+	return true;
+}
+
+#endif // WITH_EDITOR
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FOscuMIDIAutoMapTest,
@@ -343,7 +406,10 @@ bool FOscuMIDIDefaultValueParamsTest::RunTest(const FString& Parameters)
 
 	// ---- The first two continuous parameters, in order ----
 	{
+		// A span, because only a span has anywhere for a pitch to sit. On a Single Note
+		// row the second parameter is deliberately left alone -- see the block below.
 		FOscuMIDIBinding Binding;
+		Binding.Type = EOscuMIDIInputType::NoteRange;
 		const bool bWrote = UOscuMIDIMap::AssignDefaultValueParams(Binding, {
 			Param(TEXT("Speed"), TEXT("float")),
 			Param(TEXT("Depth"), TEXT("float")),
@@ -361,6 +427,7 @@ bool FOscuMIDIDefaultValueParamsTest::RunTest(const FString& Parameters)
 	// ---- int and byte count; string, vector, bool and enum do not ----
 	{
 		FOscuMIDIBinding Binding;
+		Binding.Type = EOscuMIDIInputType::NoteRange;
 		UOscuMIDIMap::AssignDefaultValueParams(Binding, {
 			Param(TEXT("Label"), TEXT("string")),      // skipped
 			Param(TEXT("Where"), TEXT("vec3")),        // skipped
@@ -377,6 +444,7 @@ bool FOscuMIDIDefaultValueParamsTest::RunTest(const FString& Parameters)
 	// ---- They are found past a multi-slot parameter ----
 	{
 		FOscuMIDIBinding Binding;
+		Binding.Type = EOscuMIDIInputType::NoteRange;
 		UOscuMIDIMap::AssignDefaultValueParams(Binding, {
 			Param(TEXT("Origin"), TEXT("vec3")),
 			Param(TEXT("Pitch"), TEXT("float")),
@@ -470,7 +538,11 @@ bool FOscuMIDIDefaultValueParamsTest::RunTest(const FString& Parameters)
 		if (TestNotNull(TEXT("the binding was listed"), Sweep))
 		{
 			TestEqual(TEXT("velocity was defaulted"), Sweep->VelocityParam, FName(TEXT("Pitch")));
-			TestEqual(TEXT("pitch was defaulted"), Sweep->PitchParam, FName(TEXT("Level")));
+
+			// Auto-map never guesses a span from a signature, so the row it created is a
+			// Single Note or a Control Change -- neither of which has a pitch to give
+			// away. Naming one is left to whoever sets the row to Note Range.
+			TestTrue(TEXT("but pitch is not, on a row auto-map created"), Sweep->PitchParam.IsNone());
 		}
 
 		// Hand-edit one, then run auto-map again. Nothing may move: that is the
@@ -688,7 +760,20 @@ bool FOscuMIDIBindingTypeTest::RunTest(const FString& Parameters)
 			Param(TEXT("Speed"), TEXT("float")),
 			Param(TEXT("Depth"), TEXT("float")),
 		});
-		TestEqual(TEXT("whereas a note row does"), Pad.PitchParam, FName(TEXT("Depth")));
+
+		// Nor does a SINGLE note, for the same reason: one note has no position in a
+		// span, so a pitch sent from here could only ever be the same number.
+		TestTrue(TEXT("nor does a single-note row"), Pad.PitchParam.IsNone());
+
+		FOscuMIDIBinding Span;
+		Span.Type = EOscuMIDIInputType::NoteRange;
+		UOscuMIDIMap::AssignDefaultValueParams(Span, {
+			Param(TEXT("Speed"), TEXT("float")),
+			Param(TEXT("Depth"), TEXT("float")),
+		});
+
+		// Only a span does.
+		TestEqual(TEXT("whereas a note range row does"), Span.PitchParam, FName(TEXT("Depth")));
 	}
 
 	return true;
