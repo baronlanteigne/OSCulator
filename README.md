@@ -9,13 +9,14 @@ bi-directional interaction between multiple tools.
 **MIDI In Mapping: https://youtu.be/_J8eaGlQ7CE**
 
 ## Road Map
-- Improved GUI for midi mapping
 - Improved tools for midi and osc out
 
 ## Key features
 
 - **Call any Blueprint event over OSC or MIDI** by tagging its actor.
 - In depth **MIDI input mapping** interface with MIDI Learn
+  - a section per actor tag, with a **Scan** that lists just that tag's functions
+  - **Single Note**, **Note Range**, Control Change and Program Change per row
   - midi in filtering by data type or range
   - rescaling for pitch, velocity and cc
 - **Send OSC and MIDI from Blueprint**
@@ -61,7 +62,7 @@ git clone -b plugin https://github.com/baronlanteigne/OSCulator.git
 The [`plugin`](../../tree/plugin) branch is the same plugin with the demo project
 stripped out, so its root drops straight into your `Plugins/` folder.
 
-49 automation tests cover the codec, registry, dispatch, networking, MIDI ingest,
+77 automation tests cover the codec, registry, dispatch, networking, MIDI ingest,
 value shaping, note ranges and the port filters. Run them with:
 
 ```
