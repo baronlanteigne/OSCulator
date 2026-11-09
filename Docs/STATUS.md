@@ -1,6 +1,6 @@
 # OSCulator — Build Status
 
-**As of 2026-08-15. All seven phases built. 35 automation tests green.**
+**As of 2026-11-09. All seven phases built, plus the editor panel. 77 automation tests green.**
 
 Run the suite headless:
 
@@ -105,6 +105,39 @@ branch not taken, and end to end through a trailing-array signature.
 
 ---
 
+### Phase 8 — The editor panel, and the note split
+
+`OSCulatorEditor`, an **Editor**-type module, so Slate and PropertyEditor never reach a
+packaged target. An `IDetailCustomization` on `UOscuMIDIMap` adds a **MIDI Mapping**
+category above the stock one: a tag -> binding -> input tree with a section per actor
+tag, a per-tag **Scan**, editable channel / note / device / remap, a parameter dropdown
+read from the live signature, per-input **Learn**, a filter and sticky collapse.
+
+Every write goes through an `IPropertyHandle`. That is not fastidiousness: a handle write
+runs `PostEditChangeProperty`, which is what calls `UOscuMIDIMap::Refresh` — re-resolving
+note names, mirroring Type down onto sources, rebuilding the lookup. Writing the member
+directly looks identical and behaves stale.
+
+`EOscuMIDIInputType` gains **NoteRange**, appended last so existing assets keep their
+serialised values. A span is now the row's kind rather than a tickbox on a source, which
+makes a pitch parameter on a single note impossible to express. Both note kinds share one
+lookup key, because a note off the wire does not know which kind of row it should reach.
+
+Detection reports itself: Auto-Map prints a level inventory and names why a tag offered
+nothing. The editor world tracks spawns and `Tags` edits live. `OSCulator.Rescan` and
+`OSCulator.OSCMonitor` added. `UserConstructionScript` and timeline internals filtered
+out of the callable surface.
+
+*Tests:* the scan report's counts, Auto-Map against a real world, and migration in both
+directions — a legacy row with a spanning source becomes Note Range and keeps its pitch
+parameter; a legacy single-note row stays Single Note and loses the one it could never
+have used.
+
+*Nothing here is required.* Delete the module and the asset is still fully editable
+through the stock property list.
+
+---
+
 ## Verified by hand
 
 - Blueprint class registers; parameters classify correctly (`vec3, name, float` → 5 args)
@@ -167,6 +200,36 @@ Known candidates if it ever gets uncomfortable, none currently justified:
 
 ---
 
+## Known gaps
+
+Found, understood, not yet fixed.
+
+### Listen For offers Pitch Bend and Aftertouch; nothing can act on them
+
+A device's **Listen For** has tickboxes for **Pitch Bend** and **Aftertouch**, and
+`FOscuMIDIPort` decodes only `0x90`, `0x80`, `0xB0`, `0xC0` and system realtime. Ticking
+either lets the messages into the queue to be dropped in the decoder's switch — queue
+pressure for nothing, and a settings panel promising something the plugin cannot do.
+
+Either wire up `0xA0` / `0xD0` / `0xE0` or hide the toggles. If they are wired up:
+**poly aftertouch is the one worth the Single Note / Note Range treatment**, because a
+key plus a pressure has the same identity-and-magnitude shape a note does. Pitch bend
+and channel aftertouch are value-only — no number to filter on, the channel is the
+selector — but both are 14-bit, and `FOscuMIDIMessage::Value` is documented `0-127` with
+`ShapeValue` clamping to it.
+
+### `OscuMIDISubsystem.h` is public but includes a private header
+
+`Public/OscuMIDISubsystem.h` includes `Private/OscuMIDIPort.h`, so the public header does
+not compile from outside its own module. `OSCulatorEditor` hit this and routed around it
+— Learn goes through `UOscuMIDIMap::UpdateLearnArming` instead — but anything later that
+needs the subsystem from outside will hit it again, a MIDI activity monitor first.
+
+Fix is to move `OscuMIDIPort.h` to `Public/`, or forward-declare `FOscuMIDIPort` and move
+`GetPorts()` out of the header.
+
+---
+
 ## Noted for later
 
 Wanted, not yet requested. Do not build without asking.
@@ -187,11 +250,11 @@ Wanted, not yet requested. Do not build without asking.
 | Migrating the old channel-first map | Baron did not want the old data. `Channels[]` was replaced outright by `Bindings[]` rather than carrying a deprecated property forever |
 | Auto-remapping a renamed function | Validate lists the broken binding and the unclaimed function side by side, which makes it a retype. Guessing which rename is which would be a guess |
 | A per-source remap range | On the binding, so a pad and a knob driving one function agree about its range. Easy to move if a case ever needs it |
-| A per-source pitch output range | Same reasoning, and it survived the note-range work: the span lives on the source because it is an input address, but `Pitch Out Min/Max` stays on the binding so two spans of different widths still mean the same thing to the function |
-| Sparse note ranges | A span is contiguous. A row firing on some notes of its range and not others is clearer as two rows, and Baron confirmed the limitation is fine because a single note is still the default |
+| A per-source pitch output range | Same reasoning. `Pitch Out Min/Max` lives on the binding so two spans of different widths still mean the same thing to the function — and since the split, the span IS the binding's kind, so there is no longer a per-source anything to put it next to |
+| Sparse note ranges | A span is contiguous. A row firing on some notes of its range and not others is clearer as two rows, and the limitation is fine because Single Note is a kind of its own |
 | Normalising pitch against the full 0-127 | A span normalises across its OWN extent, or a three-note range could only ever produce a third of the output range |
 | An ordered argument-slot list on the binding | Considered for assigning values to parameters; Baron chose naming the parameter instead. Names survive a signature reorder, which positions do not |
-| A `GetOptions` dropdown for parameter names | The engine's hook resolves to the owning asset via `GetOuterObjects` and cannot tell which array element is being edited, so it could only offer every parameter name in the map — a list that reads as valid choices without being one. `Available Parameters` shows the binding's own names instead |
+| A `GetOptions` dropdown for parameter names | The engine's hook resolves to the owning asset via `GetOuterObjects` and cannot tell which array element is being edited, so it could only offer every parameter name in the map — a list that reads as valid choices without being one. `Available Parameters` shows the binding's own names instead. **The editor panel does offer a real dropdown**, because it knows which row it is drawing |
 | Caching resolved parameter slots in the asset | A slot depends on the live signature, so a stored one would be a fact about whichever level was open last. Resolved per message against the router's per-class cache, which is already invalidated on recompile |
 | Remapping a program number | It is an identity, not a magnitude. Remap and its range are hidden on a Program Change row and ignored even if an older asset set them -- the same reasoning Send Source Number has always carried |
 | A separate "program parameter" on the binding | The program number IS the value for that row, so it goes through `Value -> Parameter` like any other. One concept, three meanings, documented |

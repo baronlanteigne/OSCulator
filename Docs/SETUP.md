@@ -109,6 +109,13 @@ functions named `OSC_Fire` are exposed, and they answer at `/laser/Fire`.
 Blueprint compiler's entire event graph behind one `int32` bytecode offset, so
 calling it with an arbitrary integer jumps into the middle of your graph.
 
+Four more are excluded for being **compiler-generated rather than authored**:
+`UserConstructionScript`, and a timeline's `*__UpdateFunc`, `*__FinishedFunc`,
+`*__EventFunc` and `*__DirectionFunc`. They live on the generated class exactly like a
+custom event, so "Blueprint-authored" cannot tell them apart — they are filtered by
+name. Running a construction script or a timeline's internal callback over the network
+is noise at best.
+
 Use `OSCulator.List Custom` to see just your own Blueprint events.
 
 ### Components answer for their actor
@@ -470,6 +477,41 @@ Maps are written **target-first**: you list what is controllable, then assign in
 it. A function that no longer exists is simply absent from the list rather than lurking
 as a row pointing nowhere.
 
+### The mapping panel
+
+Opening a map asset shows a **MIDI Mapping** panel above the raw properties. It is three
+levels deep, following the asset's own shape:
+
+```
++ Actor   [ filter ]                        Expand all  Collapse all   6 of 6
+
+      Function            Type          Value ->  remap out   Pitch ->  remap out
+ Actor tag [cube]  Scan  + function     6 functions · 1 mapped · 5 unassigned
+  ○   Material           Single Note    (first)   [x] 0 -> 1   --         Learn  + input  x
+  ●   Scale              Note Range     Scale     [x] 0 -> 1   Where  [x] 0 -> 1   + input  x
+        ch 1   note C3 -> C4   from (any device)   = 60-72 (13 notes)      Learn  x
+```
+
+- **A section per actor tag.** The tag is written once, on the header; editing it renames
+  the tag on every row in the section. Sections collapse, and stay collapsed.
+- **`+ Actor`** opens an empty section. Type the tag — the part *after* the prefix — then
+  **Scan** to list every function that tag exposes in the open level. Nothing is written
+  to the asset until you do; the empty section has an `x` to discard it.
+- **Scan is additive**, like Auto-Map: your rows and their inputs are never moved or
+  rewritten, so scanning again after adding a Blueprint event just adds the new one. Use
+  **`+ function`** for a name Scan cannot find — a native function, or an event you have
+  not compiled yet.
+- **The status dot** is from the last Validate: `●` mapped, `○` no input yet,
+  `▲` the tag exists but the function does not, `△` the tag is not in this level.
+- **`Learn`** appears on a row until it has an input, then moves to each input.
+
+Everything the panel leaves out is still under `Bindings` below it: **On Note Off**,
+**Send Source Number**, **Available Parameters**, and the **Auto Map Rules**. Deleting
+the `OSCulatorEditor` module removes the panel and nothing else — the asset is still
+fully editable through the stock property list.
+
+Every field, in full:
+
 ```
 Default Device               every source here means this device unless it says otherwise
 
@@ -480,14 +522,14 @@ Auto Map Rules[]             per-tag layout, used by Auto-Map. See below
 Bindings[]
 ├─ Tag                       "laser", from an actor tagged OSC_laser
 ├─ Function Name             called on every actor carrying the tag
-├─ Type                      Note, Control Change or Program Change, for the WHOLE row
+├─ Type                      Single Note, Note Range, Control Change or Program
+│                            Change, for the WHOLE row
 ├─ Sources[]                 everything that fires it. None is legal and inert
 │  ├─ Device                 empty inherits Default Device; empty there means any
 │  ├─ Channel                1-16
-│  ├─ Note Range             notes only: match a span of pitches, not one note
 │  ├─ Note / CC / Program #  "C3", "C#2", a bare "61", a CC number, or a program number
-│  │                         with Note Range on, Note is the BOTTOM of the span
-│  ├─ Note High              the top of the span, inclusive
+│  │                         on a Note Range row, Note is the BOTTOM of the span
+│  ├─ Note High              Note Range only: the top of the span, inclusive
 │  └─ Learn                  tick to arm, then play, turn or send something
 ├─ Send Source Number        prepend the note, CC or program number, raw, as a first arg
 ├─ Value -> Parameter        which parameter the value drives, by name. Empty = the first
@@ -497,10 +539,12 @@ Bindings[]
 ├─ Remap                     on by default: 0-127 becomes Out Min..Out Max
 ├─ Out Min / Out Max         default 0..1. Out Min > Out Max inverts
 │
-│                            ---- notes only ----
+│                            ---- Note Range only ----
 ├─ Pitch -> Parameter        which parameter pitch drives, by name. Empty = not sent
 ├─ Remap Pitch               on by default: span position becomes Pitch Out Min..Max
 ├─ Pitch Out Min / Max       default 0..1. Untick Remap Pitch for the raw note number
+│
+│                            ---- either note kind ----
 └─ On Note Off               also fire on release, with a raw value of 0
 ```
 
@@ -558,14 +602,22 @@ to Program Change is left for you to number, and auto-map says so in the log rat
 overwriting your choice. And there is **no program change on the output side** yet; `Send
 MIDI` covers notes and control change only.
 
-### Note, Control Change or Program Change is per row
+### The row's kind is per row
 
 `Type` sits on the binding, not on each source, so **every source on a row is the same
-kind**. The three behave differently in ways that reach the value settings: a note carries
-a pitch and a release, a controller carries neither, and a program change carries no
-continuous value at all. With the kind settled on the row, every setting on it is
-meaningful for every source — and the ones that are not simply **vanish from the panel**:
-pitch and On Note Off on anything but a note, Remap and its range on a program change.
+kind**. There are four:
+
+| | |
+| --- | --- |
+| **Single Note** | one note fires the row. The note is a **filter and nothing else**, exactly like the channel — so this kind has no pitch output at all |
+| **Note Range** | a span of notes fires it, and *where in the span* becomes a second value alongside velocity |
+| **Control Change** | a controller value. No pitch, no release |
+| **Program Change** | one data byte, which is both what the row matches on and what the function receives. Never remapped |
+
+They behave differently in ways that reach the value settings, so with the kind settled
+on the row every setting on it is meaningful for every source — and the ones that are not
+simply **vanish from the panel**: pitch on anything but a Note Range, On Note Off on
+anything but a note, Remap and its range on a Program Change.
 
 That hiding is the reason the kind lives here. Unreal's `EditCondition` can only read
 properties of its **own struct**, so a setting on the binding cannot see a `Type` that
@@ -579,9 +631,14 @@ Changing `Type` re-points every source on the row, and their numbers are **reint
 — note 36 becomes CC 36. Learn sets it from whatever you play, and warns if that re-points
 other sources on the row.
 
-Assets authored before this are migrated on load: each row adopts its first source's kind,
-so a controller row stays a controller row. A row that held a genuine mix — legal before,
-not now — resolves to its first source and says so in the log.
+Assets authored before the kind moved onto the row are migrated on load: each row adopts
+its first source's kind, so a controller row stays a controller row. A row that held a
+genuine mix — legal before, not now — resolves to its first source and says so in the log.
+
+Assets authored before **Single Note and Note Range split apart** are migrated too. A row
+was a span if *any* of its sources carried the old per-source tickbox; a row that was not
+keeps its single note and has its `Pitch -> Parameter` **cleared**, named in the log.
+That assignment could only ever have sent the same number — see below.
 
 **Sharing an input is legal.** Two bindings claiming the same channel and note both
 fire, which is how one pad drives two different actors. `OSCulator.MIDIValidate` lists
@@ -603,14 +660,19 @@ rest. Those are real zeroes, not the Blueprint's defaults — a tween's Duration
 `0` (instant) and its Ease as the enum's first entry. See
 [Missing values are zero, not your defaults](#missing-values-are-zero-not-your-defaults).
 
-### Note ranges, and two values at once
+### Note Range, and two values at once
 
-A note source normally matches **one** pitch. Tick **Note Range** and it matches a span
-instead — `Note` becomes the bottom, `Note High` the top — and every pitch in between
-fires the same binding. The span is contiguous; there is no way to punch holes in it. A
-row that should fire on some notes of its range and not others is two rows.
+A **Single Note** row matches one pitch. A **Note Range** row matches a span — `Note` is
+the bottom, `Note High` the top — and every pitch in between fires the same binding. The
+span is contiguous; there is no way to punch holes in it. A row that should fire on some
+notes of its range and not others is two rows.
 
-A range also makes the pitch *mean* something, so it becomes a second value alongside
+The difference is the row's `Type`, not a tickbox on each source. That is the whole point
+of the split: **a pitch only has a position inside a span**, so a pitch parameter on a
+single note could only ever send the same number on every hit. Making the span the row's
+kind turns that from something to warn about into something you cannot express.
+
+A span also makes the pitch *mean* something, so it becomes a second value alongside
 velocity:
 
 - **Pitch** is where the note sat in the span, `0..1`, remapped into **Pitch Out
@@ -622,8 +684,9 @@ velocity:
 The two have separate ranges because they are separate measurements — a pitch sweeping
 `0..1` while velocity drives a `0..10` intensity.
 
-A single note still works exactly as before. One pitch carries no information, so its
-span position is `0` and **Pitch -> Parameter** is normally left empty.
+On a **Single Note** row none of this exists. One pitch carries no information, so the
+pitch fields are absent from the panel rather than sitting there accepting settings that
+cannot do anything. The note filters, velocity is the value, and that is all.
 
 ### Which parameter gets which value
 
@@ -647,10 +710,11 @@ but both are reachable by name.
 
 Some details worth knowing:
 
-- **Auto-Map fills them in for you.** A newly listed binding gets velocity pointed at
-  its function's **first** continuous parameter and pitch at the **second**. Velocity
-  takes the first because that keeps the common case identical to the old positional
-  default. See below.
+- **Auto-Map fills velocity in for you.** A newly listed binding gets velocity pointed
+  at its function's **first** continuous parameter, which keeps the common case identical
+  to the old positional default. **Pitch is never filled in**: Auto-Map only ever creates
+  Single Note and Control Change rows, and neither has a pitch to give away. Naming one
+  is a deliberate act on a row you have set to Note Range. See below.
 - **Leave both empty and nothing changes.** The binding behaves exactly as it did before
   any of this existed: one value, first parameter. **Send Source Number** keeps working
   too. Naming either parameter takes over the whole layout, and Send Source Number is
@@ -667,22 +731,28 @@ Some details worth knowing:
 - **On release**, pitch survives but velocity does not: which pad was let go is still the
   pad it was, while a released note carries no meaningful velocity and shapes from zero.
 
-**Available Parameters** on each binding lists the names that function offers, with the
-slot each occupies, and is filled by **Validate Against Level**. It is read-only and not
-saved — it is a fact about the level that happens to be open. There is no dropdown: the
-engine's property-options hook resolves to the owning asset and cannot tell which array
-element is being edited, so it could only offer every parameter name in the whole map,
-which would read as a list of valid choices without being one.
+In the **mapping panel** the `Value` and `Pitch` columns are dropdowns listing exactly
+the names that row's function offers, read from the live signature in the open level.
+
+Under `Bindings` the same information appears as **Available Parameters**: a read-only
+line per binding, filled by **Validate Against Level**, not saved — it is a fact about
+the level that happens to be open. There is no dropdown *there* because the engine's
+property-options hook resolves to the owning asset and cannot tell which array element is
+being edited, so it could only offer every parameter name in the whole map, which would
+read as a list of valid choices without being one. The panel can offer a real one because
+it knows which row it is drawing.
 
 **Control change is untouched by all of this.** A controller already sends a value, and
 a CC number means nothing on a scale, so a span of CC numbers would be a different
 feature with no use behind it. On a Control Change row every pitch field is hidden
-outright, and Auto-Map leaves `Pitch -> Parameter` empty.
+outright — as it is on a Single Note row, and for the same reason: there is no position
+for a pitch to describe.
 
 ### What counts as a parameter worth driving
 
-**Auto-Map From Level** pre-fills the pair from the function's signature: velocity gets
-the first parameter that carries a *magnitude*, pitch gets the second.
+**Auto-Map From Level** pre-fills velocity from the function's signature: it gets the
+first parameter that carries a *magnitude*. On a Note Range row, pitch would get the
+second — but Auto-Map never creates one, so in practice pitch is always yours to name.
 
 Only `float`, `int` and `byte` qualify. The exclusions are the interesting part:
 
@@ -777,10 +847,17 @@ offers. Otherwise Prune would delete working mappings.
 
 ### Learn
 
-Tick **Learn** on a source, then play a note or turn a knob. It captures the device, the
-channel, whether it was a note or a CC, and the number — one gesture fills the whole
-row. Only one source across the asset can be armed at a time; ticking a second moves the
-arming. The flag is transient, so an armed source is never saved in that state.
+Click **Learn** on an input, then play a note or turn a knob. It captures the device, the
+channel, whether it was a note or a CC, and the number — one gesture fills the whole row.
+On a row with no input yet, Learn gives it one and arms that.
+
+Only one input across the asset can be armed at a time; arming a second moves the arming.
+The flag is transient, so an armed input is never saved in that state. Under `Bindings`
+the same thing is a **Learn** tickbox on each source.
+
+A note learned onto a **Note Range** row leaves it a range — the gesture says which note,
+not what kind of row it is. Every other combination adopts what you played, which is how
+learning a knob onto a note row re-points it.
 
 Learn is the one thing OSCulator does at edit time, and it works because the devices are
 already open — it redirects the next message rather than opening a second listener.

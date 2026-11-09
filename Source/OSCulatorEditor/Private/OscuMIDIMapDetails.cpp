@@ -393,7 +393,8 @@ void FOscuMIDIMapDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 				.Text(LOCTEXT("StatusLegend",
 					"● mapped    ○ no input yet    ▲ function missing    △ tag not in this level"))
 				.ToolTipText(LOCTEXT("StatusLegendTip",
-					"Remap ranges, pitch output, note-off and send-source-number are under Bindings below."))
+					"On Note Off, Send Source Number and Available Parameters are under Bindings below, "
+					"along with the Auto Map Rules."))
 				.ColorAndOpacity(FSlateColor::UseSubduedForeground())
 			]
 		];
