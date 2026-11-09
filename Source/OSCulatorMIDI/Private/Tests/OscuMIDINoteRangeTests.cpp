@@ -18,9 +18,8 @@ namespace OscuMIDIRangeTest
 	FOscuMIDISource NoteSpan(const uint8 Channel, const TCHAR* Low, const TCHAR* High)
 	{
 		FOscuMIDISource Source;
-		Source.Type = EOscuMIDIInputType::Note;
+		Source.Type = EOscuMIDIInputType::NoteRange;
 		Source.Channel = Channel;
-		Source.bNoteRange = true;
 		Source.Note = Low;
 		Source.NoteHigh = High;
 		return Source;
@@ -106,6 +105,55 @@ bool FOscuMIDINoteRangeSpanTest::RunTest(const FString& Parameters)
 		// The degenerate case has nowhere to sit. It must not divide by zero, and it
 		// must land on the bottom of the output range rather than halfway up it.
 		TestEqual(TEXT("a one-note span has no position"), Resolved.GetPitchFraction(60), 0.0);
+	}
+
+	// ---- A pre-split asset migrates on load ----
+	{
+		// What a map authored before Single Note and Note Range split looks like on
+		// disk: the row says Note, and the SOURCE carries the old per-source flag.
+		FOscuMIDISource Legacy;
+		Legacy.Type = EOscuMIDIInputType::Note;
+		Legacy.Channel = 1;
+		Legacy.Note = TEXT("60");
+		Legacy.NoteHigh = TEXT("72");
+		Legacy.bNoteRange = true;
+
+		FOscuMIDIBinding Ranged;
+		Ranged.Type = EOscuMIDIInputType::Note;
+		Ranged.PitchParam = FName(TEXT("Where"));
+		Ranged.Sources.Add(Legacy);
+
+		// And a row that was never a span, carrying a pitch assignment that could only
+		// ever have sent the same number.
+		FOscuMIDIBinding Single;
+		Single.Type = EOscuMIDIInputType::Note;
+		Single.PitchParam = FName(TEXT("Pointless"));
+		Single.Sources.Add(SingleNote(1, TEXT("36")));
+
+		UOscuMIDIMap* Map = NewObject<UOscuMIDIMap>(GetTransientPackage());
+		Map->Bindings.Add(Ranged);
+		Map->Bindings.Add(Single);
+
+		// Exactly what loading the asset does. Not Refresh: the migration is PostLoad
+		// only, because a binding disagreeing with its sources is what a legitimate
+		// edit looks like for the instant before the mirror runs.
+		Map->PostLoad();
+
+		TestTrue(TEXT("a row with a spanning source became Note Range"),
+			Map->Bindings[0].Type == EOscuMIDIInputType::NoteRange);
+		TestTrue(TEXT("and its source reports as a range"), Map->Bindings[0].Sources[0].IsNoteRange());
+		TestEqual(TEXT("its span survived"), Map->Bindings[0].Sources[0].GetNoteHigh(), 72);
+		TestEqual(TEXT("a real span keeps its pitch assignment"),
+			Map->Bindings[0].PitchParam, FName(TEXT("Where")));
+
+		TestTrue(TEXT("a row with no spanning source stays Single Note"),
+			Map->Bindings[1].Type == EOscuMIDIInputType::Note);
+		TestFalse(TEXT("and is not a range"), Map->Bindings[1].Sources[0].IsNoteRange());
+
+		// The whole point of the split: this assignment could only ever send Pitch Out
+		// Min, so it is removed rather than left hidden behind an EditCondition.
+		TestTrue(TEXT("a Single Note row loses its pitch assignment"),
+			Map->Bindings[1].PitchParam.IsNone());
 	}
 
 	// ---- A real span normalises across its own extent ----
@@ -197,16 +245,14 @@ bool FOscuMIDINoteRangeSpanTest::RunTest(const FString& Parameters)
 		CC.Channel = 1;
 		CC.ControlNumber = 7;
 
-		// Ticked, but on a CC source. It must stay a single controller rather than
-		// spanning CC numbers, which is a feature nobody asked for.
-		CC.bNoteRange = true;
-
 		FOscuMIDIBinding Binding;
 		Binding.Tag = FName(TEXT("laser"));
 		Binding.FunctionName = FName(TEXT("SetIntensity"));
 		Binding.Sources.Add(CC);
 		UOscuMIDIMap* Map = MakeMap({ Binding });
 
+		// A controller is never a span: a CC number means nothing on a scale, so spanning
+		// them is a feature nobody asked for and the kind cannot express it.
 		TestFalse(TEXT("a CC source is never a range"), Map->Bindings[0].Sources[0].IsNoteRange());
 
 		TArray<FOscuMIDIMatch> Matches;

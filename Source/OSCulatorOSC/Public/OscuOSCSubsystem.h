@@ -152,4 +152,32 @@ private:
 	uint64 MessagesDrained = 0;
 	uint64 MessagesCoalescedAway = 0;
 	uint64 MessagesDispatched = 0;
+
+	/**
+	 * Whether this message should be printed, given the monitor level.
+	 *
+	 * Level 1 prints the first message on each distinct address and nothing after it,
+	 * which is the mode that is actually usable: at the rate this plugin is built for,
+	 * a line per message is a wall of identical text that buries the one address you
+	 * were looking for. Level 2 prints everything and is for a single gesture.
+	 */
+	bool ShouldMonitor(int32 Level, const FString& Address);
+
+	/**
+	 * Addresses already printed at monitor level 1.
+	 *
+	 * Bounded, because addresses arrive from the network: a sender sweeping a generated
+	 * address would otherwise grow this set for the life of the process. Same reasoning
+	 * and the same one-line warning as the router's unroutable-address set.
+	 */
+	TSet<FString> MonitoredAddresses;
+	bool bMonitorCapHit = false;
+
+	/**
+	 * The level the last drain saw, so a change can clear the set above.
+	 *
+	 * Toggling the monitor off and back on is how someone asks to see the addresses
+	 * again, and a set that survived the toggle would answer with silence.
+	 */
+	int32 LastMonitorLevel = 0;
 };

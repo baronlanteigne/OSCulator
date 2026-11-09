@@ -671,7 +671,8 @@ bool UOscuMIDISubsystem::ApplyLearn(const FName Device, const FOscuMIDIMessage& 
 		{
 			switch (Kind)
 			{
-			case EOscuMIDIInputType::Note:          return TEXT("notes");
+			case EOscuMIDIInputType::Note:
+			case EOscuMIDIInputType::NoteRange:      return TEXT("notes");
 			case EOscuMIDIInputType::ControlChange:  return TEXT("control change");
 			default:                                 return TEXT("program change");
 			}
@@ -682,8 +683,14 @@ bool UOscuMIDISubsystem::ApplyLearn(const FName Device, const FOscuMIDIMessage& 
 			*Binding.Tag.ToString(), *Binding.FunctionName.ToString(),
 			KindName(Binding.Type), KindName(Message.Type), Binding.Sources.Num() - 1);
 	}
-	Binding.Type = Message.Type;
-	Source.Type = Message.Type;
+	// A note learned onto a Note Range row leaves it a range: the gesture says which
+	// note, not what kind of row this is. Every other combination adopts the message,
+	// which is how learning a knob onto a note row re-points it.
+	const bool bKeepRange = Binding.Type == EOscuMIDIInputType::NoteRange
+		&& OscuIsNoteType(Message.Type);
+
+	Binding.Type = bKeepRange ? EOscuMIDIInputType::NoteRange : Message.Type;
+	Source.Type = Binding.Type;
 
 	if (Message.Type == EOscuMIDIInputType::Note)
 	{
@@ -696,7 +703,7 @@ bool UOscuMIDISubsystem::ApplyLearn(const FName Device, const FOscuMIDIMessage& 
 		// top comes with it rather than being left inverted -- Refresh would otherwise
 		// swap the pair and quietly make the note you just played the TOP of the span,
 		// which is the opposite of what pressing it meant.
-		if (Source.bNoteRange && Source.ResolvedNoteHigh < Source.ResolvedNote)
+		if (Source.IsNoteRange() && Source.ResolvedNoteHigh < Source.ResolvedNote)
 		{
 			Source.ResolvedNoteHigh = Source.ResolvedNote;
 			Source.NoteHigh = Source.Note;

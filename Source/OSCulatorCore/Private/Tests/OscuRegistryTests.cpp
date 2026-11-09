@@ -61,6 +61,50 @@ bool FOscuRegistryTagScanTest::RunTest(const FString& Parameters)
 }
 
 //////////////////////////////////////////////////////////////////////////
+// The scan report: what a scan declined, not only what it took
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FOscuRegistryScanReportTest,
+	"OSCulator.Registry.ScanReport",
+	OscuTest::Flags)
+
+bool FOscuRegistryScanReportTest::RunTest(const FString& Parameters)
+{
+	using namespace OscuTest;
+	FScopedTestWorld Scope;
+
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("OSC_laser") });
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("OSC_laser"), TEXT("Lighting") });
+
+	// Tagged, with nothing of ours on them. This pair is the whole point of the count:
+	// it is what tells a mistyped prefix apart from a level nobody tagged.
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("Gameplay") });
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), { TEXT("Lighting"), TEXT("Audio") });
+
+	// No tags at all, so it counts towards neither total.
+	Scope.SpawnTagged(AOscuTestActor::StaticClass(), {});
+
+	Scope.BeginPlay();
+
+	UOscuRouterSubsystem* Router = Scope.Router();
+	if (!TestNotNull(TEXT("Router subsystem exists"), Router))
+	{
+		return false;
+	}
+
+	const FOscuScanReport& Scan = Router->GetLastScan();
+
+	// Bounded below only: a world carries actors of its own -- WorldSettings and
+	// friends -- and asserting an exact total would be a test of the engine.
+	TestTrue(TEXT("Every spawned actor was walked"), Scan.ActorsScanned >= 5);
+	TestEqual(TEXT("Two actors carry a prefixed tag"), Scan.ActorsTagged, 2);
+	TestEqual(TEXT("Two carry tags that are none of ours"), Scan.ActorsWithUnprefixedTags, 2);
+	TestEqual(TEXT("One tag registered"), Router->GetNumTags(), 1);
+
+	return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
 // Actors spawned after BeginPlay join the registry
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

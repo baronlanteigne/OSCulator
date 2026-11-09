@@ -11,8 +11,15 @@
 UENUM()
 enum class EOscuMIDIInputType : uint8
 {
-	/** Note on, and optionally note off. Velocity is the value. */
-	Note,
+	/**
+	 * One note, and optionally its release. Velocity is the value.
+	 *
+	 * The note itself is a FILTER and nothing else, exactly like the channel: it decides
+	 * whether the row fires and then has nothing left to say. That is why this kind has
+	 * no pitch output at all -- a single note has no position in a span, so a pitch sent
+	 * from here could only ever be the same number every time.
+	 */
+	Note UMETA(DisplayName = "Single Note"),
 
 	/** Control change. The controller value is the value. */
 	ControlChange UMETA(DisplayName = "Control Change"),
@@ -25,8 +32,28 @@ enum class EOscuMIDIInputType : uint8
 	 * controller value, nothing continuous at all -- so a row driven by one is a trigger
 	 * that happens to know which program arrived.
 	 */
-	ProgramChange UMETA(DisplayName = "Program Change")
+	ProgramChange UMETA(DisplayName = "Program Change"),
+
+	/**
+	 * A span of notes. Velocity is still the value, and WHERE in the span the note fell
+	 * is a second one.
+	 *
+	 * Its own kind rather than a tickbox on a note source, because the tickbox changed
+	 * what half the row MEANT: with it off, the pitch parameter and its range sat there
+	 * accepting settings that could not do anything. Two kinds make that state
+	 * impossible to express instead of something to warn about.
+	 *
+	 * Appended last on purpose. The values above are serialised in existing assets, and
+	 * inserting ahead of them would silently turn every saved controller row into a note.
+	 */
+	NoteRange UMETA(DisplayName = "Note Range")
 };
+
+/** True for either note kind. Both arrive on the wire as a note. */
+inline bool OscuIsNoteType(EOscuMIDIInputType Type)
+{
+	return Type == EOscuMIDIInputType::Note || Type == EOscuMIDIInputType::NoteRange;
+}
 
 /**
  * Whether a binding still points at something that exists in the open level.
@@ -114,9 +141,14 @@ struct OSCULATORMIDI_API FOscuMIDISource
 	 * that means nothing on a scale, so a span of CC numbers would be a different
 	 * feature with no use behind it.
 	 */
-	UPROPERTY(EditAnywhere, Category = "Source",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note", EditConditionHides,
-				DisplayName = "Note Range"))
+	/**
+	 * Legacy: a note source used to carry its own "this is a span" flag.
+	 *
+	 * Kept, hidden and never authored, for one reason -- it is the ONLY record a
+	 * pre-split asset has of which rows were spans, and PostLoad reads it to set the
+	 * binding's Type. Nothing else looks at it; IsNoteRange() answers from Type.
+	 */
+	UPROPERTY()
 	bool bNoteRange = false;
 
 	/**
@@ -125,7 +157,8 @@ struct OSCULATORMIDI_API FOscuMIDISource
 	 * The bottom of the span when Note Range is ticked, and the whole of it when not.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Source",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note", EditConditionHides))
+		meta = (EditCondition = "Type == EOscuMIDIInputType::Note || Type == EOscuMIDIInputType::NoteRange",
+				EditConditionHides))
 	FString Note = TEXT("C3");
 
 	/**
@@ -136,18 +169,19 @@ struct OSCULATORMIDI_API FOscuMIDISource
 	 * anyone go and check the setting.
 	 */
 	UPROPERTY(VisibleAnywhere, Category = "Source",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note", EditConditionHides))
+		meta = (EditCondition = "Type == EOscuMIDIInputType::Note || Type == EOscuMIDIInputType::NoteRange",
+				EditConditionHides))
 	uint8 ResolvedNote = 60;
 
 	/** The top of the span, inclusive. Same spelling rules as Note. */
 	UPROPERTY(EditAnywhere, Category = "Source",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note && bNoteRange", EditConditionHides,
+		meta = (EditCondition = "Type == EOscuMIDIInputType::NoteRange", EditConditionHides,
 				DisplayName = "Note High"))
 	FString NoteHigh = TEXT("C4");
 
 	/** What Note High resolved to. Swapped with the low bound if they are inverted. */
 	UPROPERTY(VisibleAnywhere, Category = "Source",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note && bNoteRange", EditConditionHides,
+		meta = (EditCondition = "Type == EOscuMIDIInputType::NoteRange", EditConditionHides,
 				DisplayName = "Resolved Note High"))
 	uint8 ResolvedNoteHigh = 72;
 
@@ -192,14 +226,15 @@ struct OSCULATORMIDI_API FOscuMIDISource
 	{
 		switch (Type)
 		{
-		case EOscuMIDIInputType::Note:          return ResolvedNote;
+		case EOscuMIDIInputType::Note:
+		case EOscuMIDIInputType::NoteRange:     return ResolvedNote;
 		case EOscuMIDIInputType::ControlChange:  return ControlNumber;
 		default:                                 return ProgramNumber;
 		}
 	}
 
 	/** True when this source spans more than the one pitch. */
-	bool IsNoteRange() const { return Type == EOscuMIDIInputType::Note && bNoteRange; }
+	bool IsNoteRange() const { return Type == EOscuMIDIInputType::NoteRange; }
 
 	/** Bottom of the span, inclusive. The only note when this is not a range. */
 	int32 GetNoteLow() const { return ResolvedNote; }
@@ -367,7 +402,7 @@ struct OSCULATORMIDI_API FOscuMIDIBinding
 	 * as it did before any of this existed.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Value",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note", EditConditionHides,
+		meta = (EditCondition = "Type == EOscuMIDIInputType::NoteRange", EditConditionHides,
 				DisplayName = "Pitch -> Parameter"))
 	FName PitchParam;
 
@@ -380,19 +415,19 @@ struct OSCULATORMIDI_API FOscuMIDIBinding
 	 * you ask for pitch as an identity rather than a position.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Value",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note", EditConditionHides,
+		meta = (EditCondition = "Type == EOscuMIDIInputType::NoteRange", EditConditionHides,
 				DisplayName = "Remap Pitch"))
 	bool bRemapPitch = true;
 
 	/** The value sent at the bottom of the span. May exceed PitchOutMax, which inverts. */
 	UPROPERTY(EditAnywhere, Category = "Value",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note && bRemapPitch", EditConditionHides,
+		meta = (EditCondition = "Type == EOscuMIDIInputType::NoteRange && bRemapPitch", EditConditionHides,
 				DisplayName = "Pitch Out Min"))
 	float PitchOutMin = 0.0f;
 
 	/** The value sent at the top of the span. */
 	UPROPERTY(EditAnywhere, Category = "Value",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note && bRemapPitch", EditConditionHides,
+		meta = (EditCondition = "Type == EOscuMIDIInputType::NoteRange && bRemapPitch", EditConditionHides,
 				DisplayName = "Pitch Out Max"))
 	float PitchOutMax = 1.0f;
 
@@ -421,7 +456,8 @@ struct OSCULATORMIDI_API FOscuMIDIBinding
 	 * once Type moved onto the binding.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Value",
-		meta = (EditCondition = "Type == EOscuMIDIInputType::Note", EditConditionHides))
+		meta = (EditCondition = "Type == EOscuMIDIInputType::Note || Type == EOscuMIDIInputType::NoteRange",
+				EditConditionHides))
 	bool bFireOnNoteOff = false;
 
 	/**
@@ -568,6 +604,21 @@ private:
 	 * there has been no edit, and the sources are the only record of what the row meant.
 	 */
 	void MigrateSourceTypesToBindings();
+
+	/**
+	 * Turns a pre-split note row into Single Note or Note Range.
+	 *
+	 * A row was a span if ANY of its sources had the old per-source flag -- a row with
+	 * one span and one single note was always really a span, with the single note
+	 * sitting in it as a one-note span. PostLoad only, like the other migration: a
+	 * legitimate edit makes Type and the legacy flag disagree, and running this on every
+	 * edit would undo the edit.
+	 *
+	 * A row that stays Single Note has its pitch assignment CLEARED, because that is the
+	 * state this split exists to remove: a single note has no position, so the pitch it
+	 * sent was Pitch Out Min on every hit. Said out loud rather than dropped quietly.
+	 */
+	void MigrateNoteRanges();
 
 public:
 
