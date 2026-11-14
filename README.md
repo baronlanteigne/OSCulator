@@ -34,6 +34,28 @@ build when prompted and you're ready to test osc and midi map with your own tool
    your controller by the name `OSCulator.MIDIDevices` prints. The demo's map asset is
    already set up.
 
+### Auto camera and TouchOSC template
+
+The demo map plays as `BP_AutoCamera` (via `GM_AutoCamera`): a CineCamera on a spring
+arm, tagged `OSC_autocam`. A `BP_EnviroManager` in the level, tagged `OSC_enviro`, finds
+the sun, sky, fog, clouds and post process volume on BeginPlay.
+`TouchOSC/AutoCamera.tosc` drives both — open it in TouchOSC and point its OSC
+connection at the Unreal machine, on the port above.
+
+| Address | Argument | Does |
+| --- | --- | --- |
+| `/autocam/OrbitY`, `/autocam/OrbitZ`, `/autocam/SpringArmLength` | `-1..1` | joystick-style rates, `0` stops |
+| `/autocam/PivotXY` | `x y`, `-1..1` | moves the pivot right / forward relative to the view, flat on the ground |
+| `/autocam/PivotZ` | `-1..1` | moves the pivot up / down in world Z, kept above the ground |
+| `/autocam/FocalLength`, `/autocam/Aperture` | `0..1` | 10–120 mm and f/1.2–22, exponential so the wide / shallow end gets the precision |
+| `/autocam/FocusOffset` | `-1..1` | focus follows the pivot; this shifts it ±120 cm |
+| `/enviro/TimeOfDay` · `/enviro/DayCycleSpeed` | `0..24` · hours/s | sun position, or a running day/night cycle |
+| `/enviro/WhiteTemp`, `WhiteTint`, `BloomIntensity`, `BloomThreshold`, `LensFlareIntensity`, `LensFlareBokehSize`, `Saturation`, `Contrast`, `Gamma`, `Gain` | one float each | post process, one fader per setting |
+
+Speeds, limits and the aspect ratio are variables on `BP_AutoCamera` (*Tuning* and
+*Lens*). In the template, **auto orbit z** keeps the orbit Z dial where you leave it so
+the camera keeps circling.
+
 ## Documentation
 
 | | |
@@ -47,8 +69,9 @@ build when prompted and you're ready to test osc and midi map with your own tool
 
 ```
 Plugins/OSCulator/                the plugin — this is the portable part
-Content/0_OSCulatorDemoProject/   demo map, BP_Laser, BP_Cube, a MIDI map asset
+Content/0_OSCulatorDemoProject/   demo map, BP_AutoCamera, BP_EnviroManager, BP_Laser, BP_Cube, a MIDI map asset
 TouchDesigner/                    a demo patch to send and receive against
+TouchOSC/                         AutoCamera.tosc, a control surface for the auto camera and environment
 Source/                           the host project module
 ```
 
