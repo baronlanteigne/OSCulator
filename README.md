@@ -42,6 +42,9 @@ the sun, sky, fog, clouds and post process volume on BeginPlay.
 `TouchOSC/AutoCamera.tosc` drives both — open it in TouchOSC and point its OSC
 connection at the Unreal machine, on the port above.
 
+**[TouchOSC controls reference →](https://claude.ai/artifact/R9vCVs2HUZrysvxFVgZnZU)** — both pages
+drawn to scale, with every control's address, range and behaviour.
+
 | Address | Argument | Does |
 | --- | --- | --- |
 | `/autocam/OrbitY`, `/autocam/OrbitZ`, `/autocam/SpringArmLength` | `-1..1` | joystick-style rates, `0` stops |
