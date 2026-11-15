@@ -4,6 +4,7 @@
 
 #include "OSCulatorCore.h"
 #include "OscuMarshal.h"
+#include "OscuProjectCode.h"
 #include "OscuSettings.h"
 
 #include "Components/ActorComponent.h"
@@ -136,12 +137,13 @@ namespace
 	 * hands the network every inherited engine function on a tagged actor; extending it
 	 * to components would add hundreds more per actor -- SetVisibility, Activate, every
 	 * PhysicsControl call -- all answering under the owner's tag. So on a component the
-	 * blanket reaches Blueprint-authored functions only. FunctionPrefix and
+	 * blanket reaches the project's own functions only: Blueprint-authored ones, and
+	 * ones declared in a C++ module the .uproject lists. FunctionPrefix and
 	 * ExtraAllowedFunctions are explicit opt-ins and apply as written, native or not.
 	 */
 	bool IsExposedOnComponent(const FOscuFunctionBinding& Binding)
 	{
-		return !Binding.bBlanketExposure || Binding.Info.bBlueprintAuthored;
+		return !Binding.bBlanketExposure || Binding.Info.bBlueprintAuthored || Binding.bProjectAuthored;
 	}
 
 	/**
@@ -804,6 +806,7 @@ TSharedRef<FOscuClassExposure> UOscuRouterSubsystem::BuildClassExposure(UClass* 
 		Binding.Function = Function;
 		Binding.Info = MoveTemp(Info);
 		Binding.bBlanketExposure = bBlanket;
+		Binding.bProjectAuthored = OscuProjectCode::IsDeclaredIn(Function, OscuProjectCode::GetProjectModuleNames());
 		Binding.bTakesAddressLeaf = TakesLeadingText(Function);
 		Exposure->ByAddressName.Add(AddressName, MoveTemp(Binding));
 	}
