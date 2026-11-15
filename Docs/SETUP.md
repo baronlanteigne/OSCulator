@@ -131,11 +131,13 @@ per-actor wiring.
   both.
 - **Otherwise every component that has it is called.** Two components declaring `Move` on
   one actor both run, the same way two actors sharing a tag both run.
-- **Only Blueprint-authored component functions are exposed** by the blanket
-  `Expose All Functions`. Extending it to components would put every inherited engine call
-  (`SetVisibility`, `Activate`, every Physics Control function) live under the owner's tag.
-  `Function Prefix` and `Extra Allowed Functions` are explicit opt-ins and apply to
-  components as written, native or not.
+- **Only the project's own component functions are exposed** by the blanket
+  `Expose All Functions`: Blueprint-authored ones, and C++ ones declared in a module your
+  `.uproject` lists. Engine and plugin components stay shut, since exposing them would put
+  every inherited engine call (`SetVisibility`, `Activate`, every Physics Control function)
+  live under the owner's tag. A function your component inherits from an engine class
+  stays shut too. `Function Prefix` and `Extra Allowed Functions` are explicit opt-ins and
+  apply to components as written, whoever declared them.
 - Component functions appear under the owner's tag in `OSCulator.List`, `/_describe`, and
   MIDI Auto-Map, exactly like the actor's own.
 

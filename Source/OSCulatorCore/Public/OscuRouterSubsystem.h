@@ -25,9 +25,13 @@ struct FOscuFunctionBinding
 	FOscuExposedFunctionInfo Info;
 
 	/** Exposed only because bExposeAllFunctions is on, rather than by FunctionPrefix or
-	 *  ExtraAllowedFunctions. On a component that blanket reaches Blueprint-authored
-	 *  functions only -- see IsExposedOnComponent. */
+	 *  ExtraAllowedFunctions. On a component that blanket reaches the project's own
+	 *  functions only (Blueprint or project C++) -- see IsExposedOnComponent. */
 	bool bBlanketExposure = false;
+
+	/** Declared in one of the project's own C++ modules, which the blanket reaches on a
+	 *  component just like a Blueprint-authored function. */
+	bool bProjectAuthored = false;
 
 	/** The first parameter the message fills is text -- a Name, String or Text -- so
 	 *  the address-leaf fallback may call this with the end of the address in it. */

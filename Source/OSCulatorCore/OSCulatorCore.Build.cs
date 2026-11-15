@@ -22,6 +22,8 @@ public class OSCulatorCore : ModuleRules
 		{
 			// Only for OSCulator.Export.
 			"Json",
+			// The .uproject's module list: which native component functions are the project's own.
+			"Projects",
 		});
 
 		if (Target.bBuildEditor)
