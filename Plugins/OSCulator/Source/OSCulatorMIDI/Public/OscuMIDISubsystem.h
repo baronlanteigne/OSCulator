@@ -14,6 +14,19 @@ class UOscuRouterSubsystem;
 class UWorld;
 struct FMIDIDeviceInfo;
 
+/** One input as the player menu's Learn caught it. */
+struct FOscuMIDICapture
+{
+	FName Device;
+	EOscuMIDIInputType Type = EOscuMIDIInputType::Note;
+
+	/** 1-16. */
+	int32 Channel = 1;
+
+	/** Note, controller or program number. */
+	int32 Number = 0;
+};
+
 /** One opened output device, paired with the name it was configured under. */
 USTRUCT()
 struct FOscuMIDIOutput
@@ -95,8 +108,17 @@ public:
 	 */
 	const TArray<TObjectPtr<UOscuMIDIMap>>& GetActiveMaps() const { return ActiveMaps; }
 
-	/** Replaces the loaded set. For tests and for Learn. */
-	void SetActiveMaps(TArray<TObjectPtr<UOscuMIDIMap>> Maps) { ActiveMaps = MoveTemp(Maps); }
+	/**
+	 * The map assets as loaded, before the player menu's remaps.
+	 *
+	 * GetActiveMaps is what dispatch reads: these same assets when the player has
+	 * remapped nothing, otherwise transient copies with the remapped bindings moved
+	 * into one extra map. The assets themselves are never edited.
+	 */
+	const TArray<TObjectPtr<UOscuMIDIMap>>& GetSourceMaps() const { return SourceMaps; }
+
+	/** Replaces the loaded set, then reapplies the player's remaps. For tests and for Learn. */
+	void SetActiveMaps(TArray<TObjectPtr<UOscuMIDIMap>> Maps);
 
 	/** The one-map convenience over SetActiveMaps. */
 	void SetActiveMap(UOscuMIDIMap* Map);
@@ -162,6 +184,32 @@ public:
 
 	int32 GetPendingNoteOffCount() const { return PendingNoteOffs.Num(); }
 	int32 GetOpenOutputCount() const { return Outputs.Num(); }
+
+	// ---- Player menu ----
+
+	/**
+	 * Hands the next note-on, controller or program change to OnCaptured instead of
+	 * dispatching it. The player menu's Learn, and unlike the map editor's it works in a
+	 * packaged build. Ignored channels are lifted while armed, as for Learn.
+	 */
+	void ArmCapture(TFunction<void(const FOscuMIDICapture&)> OnCaptured);
+	void CancelCapture();
+	bool IsCapturing() const { return static_cast<bool>(PlayerCapture); }
+
+	/**
+	 * The project's own binding for a tag and function, from the map assets as loaded,
+	 * or null. OutDevice receives the device its first source requires (None: any).
+	 */
+	const FOscuMIDIBinding* FindProjectBinding(FName Tag, FName FunctionName, FName* OutDevice = nullptr) const;
+
+	/** Input devices this machine has, by the names MIDI Input Devices expects. */
+	static void GetAvailableInputDevices(TArray<FString>& OutNames);
+
+	/** Output devices this machine has, by the names MIDI Output Devices expects. */
+	static void GetAvailableOutputDevices(TArray<FString>& OutNames);
+
+	/** Re-derives the active maps from the source maps and the player's remaps. */
+	void RebuildEffectiveMaps();
 
 #if WITH_EDITOR
 	/**
@@ -231,6 +279,19 @@ private:
 
 	UPROPERTY()
 	TArray<TObjectPtr<UOscuMIDIMap>> ActiveMaps;
+
+	/** The assets as loaded; ActiveMaps is derived from these. */
+	UPROPERTY()
+	TArray<TObjectPtr<UOscuMIDIMap>> SourceMaps;
+
+	TFunction<void(const FOscuMIDICapture&)> PlayerCapture;
+	FDelegateHandle PlayerMappingsChangedHandle;
+
+	/** A remap arrived mid-dispatch; RunDeferredRestart rebuilds once the drain is done. */
+	bool bRebuildPending = false;
+
+	/** Channel masks back to configured, unless Learn or a capture still wants them open. */
+	void RestoreChannelMasksIfIdle();
 
 	FDelegateHandle PostEngineInitHandle;
 	FDelegateHandle SettingsChangedHandle;

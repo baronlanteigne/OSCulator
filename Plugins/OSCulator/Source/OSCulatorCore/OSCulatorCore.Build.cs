@@ -14,6 +14,7 @@ public class OSCulatorCore : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"DeveloperSettings",
+			"InputCore",
 			// Quartz: the clock hands out a UQuartzClockHandle.
 			"AudioMixer",
 		});

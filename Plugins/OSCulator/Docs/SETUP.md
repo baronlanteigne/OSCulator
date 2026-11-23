@@ -1028,6 +1028,128 @@ Start fires bar 0 and beat 0 immediately.
 
 ---
 
+## 6c. Player menu
+
+A small in-game menu for a packaged build, where the player has no Project Settings and
+no map editor. It lets the player point the controls **you** choose at **their**
+controller. It does not replace the map editor. It only overrides the mapping that's
+already there.
+
+**Project Settings → Plugins → OSCulator → Player Menu**
+
+| Setting | Does |
+| --- | --- |
+| **Enable Player Menu** | Off by default. Off, nothing is added to the viewport and no remap applies. |
+| **Title** | The menu's heading. |
+| **Theme** | Midnight (default), Graphite, Light, Ember, Noir, or Custom with your own **Background**, **Text** and **Accent**. |
+| **Player Can Change Theme** | On by default: small colour swatches at the bottom of the menu let the player pick another theme. Their pick is saved with their remaps; picking your theme again clears it. |
+| **Corner Button** + **Button Corner** | A small, faint button in one corner of the screen. It brightens on hover. It can only be clicked if your game shows a mouse cursor. |
+| **Open With Key** + **Key** | Default **F10**. Works whatever your own input setup is, because the key is read before the game sees it. **Esc** closes the menu. |
+| **Show OSC Port** | **OSC in**: the listen port, editable. Needs OSC Input enabled. |
+| **Show MIDI Devices** | **MIDI in**: a tick box per MIDI input device on the machine. Needs MIDI Input enabled. |
+| **Show OSC Out** | **OSC out**: host and port of the first OSC target (one named *Player* is added if there are none). Needs OSC Output enabled. |
+| **Show MIDI Out Devices** | **MIDI out**: a tick box per MIDI output device. Needs MIDI Output enabled. |
+| **Controls** | The functions the player can remap (the menu's **Inputs**), in menu order. Each row has a **Tag** and a **Function** (each with a **Pick** button that lists what the open level actually exposes), a **Label** the player sees (empty uses the function name), and **OSC** / **MIDI** tick boxes for which of the two the player may change. |
+| **Save Changes Made In PIE** | Off: what you change while testing in PIE is put back when play stops, so testing never edits the project. On: saved exactly as in a packaged build. |
+
+You can turn on the button, the key, or both. Turn both off and open it from your own UI
+with **Open Player Menu** / **Toggle Player Menu** (Blueprint, category *OSCulator |
+Player Menu*). Console commands: `OSCulator.PlayerMenu` (toggle),
+`OSCulator.PlayerMenu.List`, `OSCulator.PlayerMenu.Reset`.
+
+### What the player sees
+
+- **Connection.** **OSC in** is the listen port, with a dot for whether it is listening and
+  this machine's IP address to type into the controller. **MIDI in** and **MIDI out** are
+  tick boxes per device. A device the project lists but that isn't plugged in shows as
+  *not connected*, so it can be unticked. PortMidi lists devices once per launch, so a
+  controller plugged in later needs a restart. **OSC out** is where outputs are sent.
+- **Inputs, one row per control**: the label, the OSC address (empty shows the default in grey),
+  **listen** (move a control on the OSC controller and its address is taken), the MIDI
+  input (in the accent colour once the player changed it), **learn** (play a note, press a pad or move a
+  knob), and **×** to reset each one.
+- **Outputs, one row per event output** (see [6d](#6d-event-outputs)): the OSC address it
+  sends to, and the MIDI message, typed as `cc 21`, `note C3`, `ch 2 cc 21` or `off`.
+  **learn** takes the pad or knob the player touches next, for controllers that light up
+  or move to what they're sent. **test** sends it once at its highest value.
+
+The bottom of the menu carries a credit line, *Made using OSCulator plugin by Baron
+Lanteigne*, and a link to the plugin's GitHub page, which opens in the browser.
+
+Every change applies at once. There is no Apply button. **Reset all** puts every
+input and output back to the project's, but leaves the connection settings as they are.
+
+### How a remap applies
+
+**OSC.** The player's address is rewritten to `/<tag>/<function>` as it arrives, before
+coalescing, so everything after it (argument counts, coalescing, the monitor) works as
+usual. The function's own address stops reaching it, so a controller that happens to
+send the default address for something else can't trigger it twice. Matching ignores
+case and a trailing slash. The values still have to fit the signature: a remap changes
+the address, not the arguments.
+
+**MIDI.** Your map assets are never edited. When the player remaps something, dispatch
+reads transient copies of the assets. The remapped binding moves into one extra map and
+keeps its value settings (range, parameter, note off). Its original inputs are emptied
+in the copy. A learned input fires from **any** open device, so switching controllers
+in the menu doesn't break it. The rules match the editor's Learn: a knob on a note row
+makes it a controller row, and a note played on a Note Range row moves the range so that
+note is its bottom, keeping its width. A function that no map binds can still be given a
+MIDI input; it then gets the binding defaults (0–1 into the first parameter).
+
+**Only listed controls apply.** A stored remap applies only while the menu is enabled
+and its function is still listed with that column ticked. A remap file left over from an
+older build can't keep re-pointing something the menu no longer offers.
+
+### Where it's saved
+
+| What | Where |
+| --- | --- |
+| OSC addresses and MIDI messages per input and output | `Saved/OSCulator/PlayerMappings.json` (in a packaged build, the platform's per-user Saved folder) |
+| OSC in port, OSC out target, MIDI in and out devices | `OSCulator.ini`, the endpoint file OSCulator applies over Project Settings at launch: next to the `.uproject` in the editor, next to the executable in a packaged build |
+
+If `OSCulator.ini` can't be written (a read-only install folder, say), the menu says so
+and the change lasts until the game closes.
+
+---
+
+## 6d. Event outputs
+
+The other direction: a Blueprint calls an **event dispatcher**, and OSCulator sends OSC
+and/or MIDI. No send nodes. As on the input side, the tag exposes the actor and the
+signature is the schema.
+
+**Project Settings → Plugins → OSCulator → Event Outputs**, one row per dispatcher:
+
+| Field | Does |
+| --- | --- |
+| **Tag** + **Event Dispatcher** | Which dispatcher, on every actor with that tag. Both have a **Pick** button that lists what the open level has; the dispatcher list shows the Blueprint's own dispatchers with their parameters. |
+| **Label** | What the player menu shows. |
+| **Send OSC** + **OSC Address** | On by default, to `/<tag>/<dispatcher>`, to every enabled OSC target. Needs OSC Output enabled. |
+| **MIDI** | Nothing, **Note** or **Control Change**, with **Channel** and **Number**. Goes to every MIDI output device. Needs MIDI Output enabled. |
+| **Value Min** / **Value Max** | Which range of the dispatcher's first number becomes 0–127: velocity for a note, value for a controller. |
+| **Note Length** | How long a note sounds before its note off. |
+| **In Player Menu**, **Player Edits OSC / MIDI** | Whether the player sees it, and which of the two they may change. |
+
+**What is sent.** Every parameter becomes an OSC argument, in order: numbers as numbers,
+a bool as true/false, names and strings as strings, a vector as three floats, a rotator
+as pitch, yaw, roll, a linear colour as r, g, b, a. Anything else (objects, arrays, other
+structs) is left out. The **first number** is the MIDI value. A dispatcher with no
+parameters is a trigger: OSC with no arguments, MIDI at 127. A note with value 0 is not
+sent, because velocity 0 means note off on the wire.
+
+**Binding.** At play start OSCulator binds to the dispatcher on every actor carrying the
+tag, and on matching actors spawned later. A tag whose class has no dispatcher by that
+name is named once in the log. Editing the list in Project Settings during play rebinds.
+Dispatchers on components aren't covered yet.
+
+Event outputs run whether or not the player menu is enabled. **In Player Menu** only
+decides whether the player can see and change them.
+
+Console: `OSCulator.PlayerMenu.List` marks output remaps with `out`.
+
+---
+
 ## 7. Things worth knowing
 
 **Channels are 1–16 everywhere** in OSCulator — in the map asset, in the Blueprint

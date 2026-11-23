@@ -4,6 +4,7 @@
 
 #include "OscuMIDIMap.h"
 #include "OscuMIDIMapDetails.h"
+#include "OscuPlayerMenuEntryCustomization.h"
 
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
@@ -19,6 +20,13 @@ void FOSCulatorEditorModule::StartupModule()
 		UOscuMIDIMap::StaticClass()->GetFName(),
 		FOnGetDetailCustomizationInstance::CreateStatic(&FOscuMIDIMapDetails::MakeInstance));
 
+	PropertyModule.RegisterCustomPropertyTypeLayout(
+		TEXT("OscuPlayerMenuEntry"),
+		FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FOscuPlayerMenuEntryCustomization::MakeInstance));
+	PropertyModule.RegisterCustomPropertyTypeLayout(
+		TEXT("OscuEventOutput"),
+		FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FOscuPlayerMenuEntryCustomization::MakeInstance));
+
 	PropertyModule.NotifyCustomizationModuleChanged();
 }
 
@@ -32,6 +40,8 @@ void FOSCulatorEditorModule::ShutdownModule()
 			FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
 		PropertyModule.UnregisterCustomClassLayout(UOscuMIDIMap::StaticClass()->GetFName());
+		PropertyModule.UnregisterCustomPropertyTypeLayout(TEXT("OscuPlayerMenuEntry"));
+		PropertyModule.UnregisterCustomPropertyTypeLayout(TEXT("OscuEventOutput"));
 		PropertyModule.NotifyCustomizationModuleChanged();
 	}
 }

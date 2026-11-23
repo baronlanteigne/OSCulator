@@ -19,6 +19,11 @@ bi-directional interaction between multiple tools.
   - **Single Note**, **Note Range**, Control Change and Program Change per row
   - midi in filtering by data type or range
   - rescaling for pitch, velocity and cc
+- **Event outputs**: call an event dispatcher on a tagged actor and OSCulator sends OSC
+  and/or MIDI, its parameters as the arguments. No send nodes.
+- **Player menu for packaged builds**: you pick which inputs and outputs the player may
+  remap and label them; the player points them at their own OSC addresses, MIDI messages,
+  ports and devices, with listen and learn. Opens from a corner button, a key, or Blueprint.
 - **Send OSC and MIDI from Blueprint**
   - Avoid stuck notes: `Send MIDI Note` releases the note automatically after a tweakable duration.
   
@@ -88,7 +93,7 @@ git clone -b plugin https://github.com/baronlanteigne/OSCulator.git
 The [`plugin`](../../tree/plugin) branch is the same plugin with the demo project
 stripped out, so its root drops straight into your `Plugins/` folder.
 
-77 automation tests cover the codec, registry, dispatch, networking, MIDI ingest,
+83 automation tests cover the codec, registry, dispatch, networking, MIDI ingest,
 value shaping, note ranges and the port filters. Run them with:
 
 ```

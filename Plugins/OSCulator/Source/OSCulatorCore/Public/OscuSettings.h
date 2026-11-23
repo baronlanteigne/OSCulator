@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
+#include "InputCoreTypes.h"
 #include "UObject/SoftObjectPath.h"
 #include "OscuSettings.generated.h"
 
@@ -179,6 +180,169 @@ struct OSCULATORCORE_API FOscuMIDIInputDevice
 	UPROPERTY(EditAnywhere, Config, Category = "MIDI Input Device",
 		meta = (DisplayName = "Ignored Channels"))
 	TArray<int32> IgnoredChannels;
+};
+
+/** The player menu's colours. */
+UENUM()
+enum class EOscuPlayerMenuTheme : uint8
+{
+	Midnight,
+	Graphite,
+	Light,
+	Ember,
+	Noir,
+	/** Background, Text and Accent below. */
+	Custom,
+};
+
+/** Which corner of the screen the player menu's button sits in. */
+UENUM()
+enum class EOscuPlayerMenuCorner : uint8
+{
+	TopLeft UMETA(DisplayName = "Top Left"),
+	TopRight UMETA(DisplayName = "Top Right"),
+	BottomLeft UMETA(DisplayName = "Bottom Left"),
+	BottomRight UMETA(DisplayName = "Bottom Right"),
+};
+
+/**
+ * One function the player may remap, and the name the player sees it under.
+ *
+ * The defaults are what the project already does: /<Tag>/<FunctionName> for OSC, and
+ * whatever a MIDI map asset binds to this tag and function for MIDI. The player menu
+ * only overrides them.
+ */
+USTRUCT()
+struct OSCULATORCORE_API FOscuPlayerMenuEntry
+{
+	GENERATED_BODY()
+
+	/** Tag with the prefix already stripped: "laser", from an actor tagged OSC_laser. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu")
+	FName Tag;
+
+	/** As it appears in the address: "fire", for /laser/fire. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu")
+	FName FunctionName;
+
+	/** What the player reads. Empty shows the function name. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu")
+	FText Label;
+
+	/** The player can change the OSC address that calls this. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu", meta = (DisplayName = "OSC"))
+	bool bOSC = true;
+
+	/** The player can change the MIDI input that calls this. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu", meta = (DisplayName = "MIDI"))
+	bool bMIDI = true;
+
+	FText GetDisplayLabel() const
+	{
+		return Label.IsEmpty() ? FText::FromString(FName::NameToDisplayString(FunctionName.ToString(), false)) : Label;
+	}
+};
+
+/** What an event output sends over MIDI by default. */
+UENUM()
+enum class EOscuEventMIDIKind : uint8
+{
+	None UMETA(DisplayName = "Nothing"),
+	Note UMETA(DisplayName = "Note"),
+	ControlChange UMETA(DisplayName = "Control Change"),
+};
+
+/**
+ * An event dispatcher on a tagged actor that sends OSC and/or MIDI when called.
+ *
+ * The Blueprint just calls its dispatcher; OSCulator is bound to it on every actor
+ * carrying the tag. The dispatcher's parameters become the OSC arguments, in order, and
+ * its first number is the MIDI value. A dispatcher with no parameters is a trigger.
+ */
+USTRUCT()
+struct OSCULATORCORE_API FOscuEventOutput
+{
+	GENERATED_BODY()
+
+	/** Tag with the prefix already stripped: "laser", from an actor tagged OSC_laser. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output")
+	FName Tag;
+
+	/** The event dispatcher's name, as in the Blueprint's My Blueprint panel. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output", meta = (DisplayName = "Event Dispatcher"))
+	FName Dispatcher;
+
+	/** What the player reads in the menu. Empty shows the dispatcher's name. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output")
+	FText Label;
+
+	/** Send OSC. Needs OSC Output enabled; goes to every enabled OSC target. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output", meta = (DisplayName = "Send OSC"))
+	bool bSendOSC = true;
+
+	/** Empty sends to /<Tag>/<Dispatcher>. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "bSendOSC", DisplayName = "OSC Address"))
+	FString OSCAddress;
+
+	/** What to send over MIDI. Needs MIDI Output enabled; goes to every output device. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output", meta = (DisplayName = "MIDI"))
+	EOscuEventMIDIKind MIDIKind = EOscuEventMIDIKind::None;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "MIDIKind != EOscuEventMIDIKind::None", EditConditionHides,
+				DisplayName = "MIDI Channel", ClampMin = "1", ClampMax = "16"))
+	int32 MIDIChannel = 1;
+
+	/** The note or controller number. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "MIDIKind != EOscuEventMIDIKind::None", EditConditionHides,
+				DisplayName = "MIDI Number", ClampMin = "0", ClampMax = "127"))
+	int32 MIDINumber = 0;
+
+	/**
+	 * The range of the dispatcher's first number that maps onto MIDI 0-127 (velocity for a
+	 * note, value for a controller). A dispatcher with no number sends 127.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "MIDIKind != EOscuEventMIDIKind::None", EditConditionHides, DisplayName = "Value Min"))
+	float ValueMin = 0.0f;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "MIDIKind != EOscuEventMIDIKind::None", EditConditionHides, DisplayName = "Value Max"))
+	float ValueMax = 1.0f;
+
+	/** How long a note sounds before its note off. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "MIDIKind == EOscuEventMIDIKind::Note", EditConditionHides,
+				DisplayName = "Note Length", ClampMin = "0.01", Units = "s"))
+	float NoteLength = 0.1f;
+
+	/** List it in the player menu, so the player can re-point it. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output", meta = (DisplayName = "In Player Menu"))
+	bool bInPlayerMenu = true;
+
+	/** The player can change the OSC address. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "bInPlayerMenu", DisplayName = "Player Edits OSC"))
+	bool bPlayerOSC = true;
+
+	/** The player can change the MIDI message. */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Output",
+		meta = (EditCondition = "bInPlayerMenu", DisplayName = "Player Edits MIDI"))
+	bool bPlayerMIDI = true;
+
+	FString GetDefaultOSCAddress() const
+	{
+		return OSCAddress.IsEmpty()
+			? FString::Printf(TEXT("/%s/%s"), *Tag.ToString(), *Dispatcher.ToString())
+			: OSCAddress;
+	}
+
+	FText GetDisplayLabel() const
+	{
+		return Label.IsEmpty() ? FText::FromString(FName::NameToDisplayString(Dispatcher.ToString(), false)) : Label;
+	}
 };
 
 /**
@@ -551,6 +715,117 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, Config, Category = "Clock", meta = (DisplayName = "Quartz Clock"))
 	FName ClockQuartzName = TEXT("Main");
+
+	// ---- Player Menu ----
+
+	/**
+	 * An in-game menu where the player re-points chosen functions at their own
+	 * controller: a different OSC address, a different MIDI input, the OSC port and the
+	 * MIDI device. For a packaged build, where Project Settings and the map editor are
+	 * not there. Open it with the corner button, the key, or Open Player Menu.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu", meta = (DisplayName = "Enable Player Menu"))
+	bool bEnablePlayerMenu = false;
+
+	/** The menu's heading. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Title"))
+	FText PlayerMenuTitle = NSLOCTEXT("OSCulator", "PlayerMenuTitle", "Controller Setup");
+
+	/** The menu's colours. Custom uses the three colours below. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Theme"))
+	EOscuPlayerMenuTheme PlayerMenuTheme = EOscuPlayerMenuTheme::Midnight;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu && PlayerMenuTheme == EOscuPlayerMenuTheme::Custom", EditConditionHides,
+				DisplayName = "Background", HideAlphaChannel))
+	FLinearColor PlayerMenuBackground = FLinearColor(FColor(13, 17, 23));
+
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu && PlayerMenuTheme == EOscuPlayerMenuTheme::Custom", EditConditionHides,
+				DisplayName = "Text", HideAlphaChannel))
+	FLinearColor PlayerMenuText = FLinearColor(FColor(230, 237, 243));
+
+	/** Focus, the player's own choices, and what is waiting for input. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu && PlayerMenuTheme == EOscuPlayerMenuTheme::Custom", EditConditionHides,
+				DisplayName = "Accent", HideAlphaChannel))
+	FLinearColor PlayerMenuAccent = FLinearColor(FColor(88, 166, 255));
+
+	/** Small colour swatches at the bottom of the menu, so the player can pick another theme. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Player Can Change Theme"))
+	bool bPlayerMenuThemePicker = true;
+
+	/** A small, faint button in a corner of the screen. Needs a visible mouse cursor to be clicked. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Corner Button"))
+	bool bPlayerMenuButton = true;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu && bPlayerMenuButton", EditConditionHides, DisplayName = "Button Corner"))
+	EOscuPlayerMenuCorner PlayerMenuCorner = EOscuPlayerMenuCorner::TopRight;
+
+	/** A key that opens and closes the menu, whatever the game's own input does with it. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Open With Key"))
+	bool bPlayerMenuKey = true;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu && bPlayerMenuKey", EditConditionHides, DisplayName = "Key"))
+	FKey PlayerMenuKey = EKeys::F10;
+
+	/** Show the OSC listen port. Needs OSC Input enabled. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Show OSC Port"))
+	bool bPlayerMenuOSCPort = true;
+
+	/** Show the OSC output host and port (the first OSC target). Needs OSC Output enabled. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Show OSC Out"))
+	bool bPlayerMenuOSCOut = true;
+
+	/** Show which MIDI output devices are used. Needs MIDI Output enabled. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Show MIDI Out Devices"))
+	bool bPlayerMenuMIDIOutDevices = true;
+
+	/** Show which MIDI input devices are opened. Needs MIDI Input enabled. */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Show MIDI Devices"))
+	bool bPlayerMenuMIDIDevices = true;
+
+	/**
+	 * The functions the player can remap, in the order the menu lists them. Anything not
+	 * listed keeps the project's mapping and is not shown.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Controls",
+				TitleProperty = "{Label}  /{Tag}/{FunctionName}"))
+	TArray<FOscuPlayerMenuEntry> PlayerMenuEntries;
+
+	/**
+	 * Keep what the menu changes when play stops in the editor.
+	 *
+	 * Off: changes made in PIE last until play stops, then the port, devices and
+	 * remaps go back to what they were, so testing the menu never edits the project.
+	 * On: they are saved exactly as in a packaged build (OSCulator.ini and
+	 * Saved/OSCulator/PlayerMappings.json) and apply to every later session.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Player Menu",
+		meta = (EditCondition = "bEnablePlayerMenu", EditConditionHides, DisplayName = "Save Changes Made In PIE"))
+	bool bPlayerMenuSaveInPIE = false;
+
+	// ---- Event Outputs ----
+
+	/**
+	 * Event dispatchers that send OSC and/or MIDI when a Blueprint calls them. Active in
+	 * play whether or not the player menu is enabled; In Player Menu lists one there.
+	 */
+	UPROPERTY(EditAnywhere, Config, Category = "Event Outputs",
+		meta = (DisplayName = "Event Outputs", TitleProperty = "{Label}  /{Tag}/{Dispatcher}"))
+	TArray<FOscuEventOutput> EventOutputs;
 
 	/** The tempo a BPM CC value stands for, under BPM Min and BPM Max. */
 	float ClockBPMFromCCValue(int32 Value) const

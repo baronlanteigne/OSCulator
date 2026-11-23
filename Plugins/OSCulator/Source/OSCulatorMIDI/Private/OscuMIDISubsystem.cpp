@@ -7,6 +7,7 @@
 #include "OscuMIDINoteName.h"
 #include "OscuMIDIPort.h"
 #include "OscuMarshal.h"
+#include "OscuPlayerMappings.h"
 #include "OscuRouterSubsystem.h"
 #include "OscuSettings.h"
 #include "OscuValue.h"
@@ -23,6 +24,7 @@
 #include "Misc/CoreDelegates.h"
 #include "Misc/ScopeExit.h"
 #include "Templates/UnrealTemplate.h"
+#include "UObject/Package.h"
 
 void UOscuMIDISubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -46,6 +48,17 @@ void UOscuMIDISubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// restart to test a settings change turns every wrong guess into a two-minute
 	// round trip.
 	SettingsChangedHandle = UOscuSettings::OnSettingsChanged.AddUObject(this, &UOscuMIDISubsystem::Restart);
+
+	// A remap from the player menu only re-derives the maps; the ports stay open.
+	PlayerMappingsChangedHandle = FOscuPlayerMappings::OnChanged.AddWeakLambda(this, [this]()
+	{
+		if (bDraining)
+		{
+			bRebuildPending = true;
+			return;
+		}
+		RebuildEffectiveMaps();
+	});
 
 	// Engine-level rather than a world timer, so a note started in PIE is still
 	// released if play stops before its duration elapses.
@@ -73,6 +86,13 @@ void UOscuMIDISubsystem::Deinitialize()
 		SettingsChangedHandle.Reset();
 	}
 
+	if (PlayerMappingsChangedHandle.IsValid())
+	{
+		FOscuPlayerMappings::OnChanged.Remove(PlayerMappingsChangedHandle);
+		PlayerMappingsChangedHandle.Reset();
+	}
+	PlayerCapture.Reset();
+
 	if (TickerHandle.IsValid())
 	{
 		FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
@@ -99,11 +119,18 @@ UOscuMIDISubsystem* UOscuMIDISubsystem::Get()
 
 void UOscuMIDISubsystem::SetActiveMap(UOscuMIDIMap* Map)
 {
-	ActiveMaps.Reset();
+	TArray<TObjectPtr<UOscuMIDIMap>> Maps;
 	if (Map != nullptr)
 	{
-		ActiveMaps.Add(Map);
+		Maps.Add(Map);
 	}
+	SetActiveMaps(MoveTemp(Maps));
+}
+
+void UOscuMIDISubsystem::SetActiveMaps(TArray<TObjectPtr<UOscuMIDIMap>> Maps)
+{
+	SourceMaps = MoveTemp(Maps);
+	RebuildEffectiveMaps();
 }
 
 void UOscuMIDISubsystem::Restart()
@@ -364,7 +391,7 @@ void UOscuMIDISubsystem::OpenDevices()
 
 	// Every configured map, all of them live at once. One that will not load is named
 	// and skipped rather than taking the others down with it.
-	ActiveMaps.Reset();
+	SourceMaps.Reset();
 	for (const FSoftObjectPath& Path : Settings.MIDIMaps)
 	{
 		if (!Path.IsValid())
@@ -379,17 +406,19 @@ void UOscuMIDISubsystem::OpenDevices()
 			continue;
 		}
 
-		ActiveMaps.Add(Map);
+		SourceMaps.Add(Map);
 	}
 
-	if (ActiveMaps.Num() == 0)
+	RebuildEffectiveMaps();
+
+	if (SourceMaps.Num() == 0)
 	{
 		UE_LOG(LogOSCulator, Warning,
 			TEXT("MIDI input is enabled but no map asset is set in Project Settings > Plugins > OSCulator. MIDI will arrive and go nowhere."));
 	}
 	else
 	{
-		for (const TObjectPtr<UOscuMIDIMap>& Map : ActiveMaps)
+		for (const TObjectPtr<UOscuMIDIMap>& Map : SourceMaps)
 		{
 			UE_LOG(LogOSCulator, Log, TEXT("MIDI map loaded: '%s' (%d binding(s)%s)."),
 				*Map->GetName(), Map->Bindings.Num(),
@@ -475,6 +504,10 @@ void UOscuMIDISubsystem::OpenDevices()
 			Port.SetChannelMask(0xFFFF);
 		}
 #endif
+		if (PlayerCapture)
+		{
+			Port.SetChannelMask(0xFFFF);
+		}
 
 		Ports.Add(MoveTemp(Port));
 	}
@@ -510,7 +543,13 @@ void UOscuMIDISubsystem::RunDeferredRestart()
 	if (!bDraining && bRestartPending)
 	{
 		bRestartPending = false;
+		bRebuildPending = false;
 		Restart();
+	}
+	else if (!bDraining && bRebuildPending)
+	{
+		bRebuildPending = false;
+		RebuildEffectiveMaps();
 	}
 }
 
@@ -624,10 +663,7 @@ void UOscuMIDISubsystem::CancelLearn(const UOscuMIDIMap* Map)
 
 	// Each port back to its own configured mask, now that nothing is listening for a
 	// stray channel. Per port, because the lists are per device.
-	for (FOscuMIDIPort& Port : Ports)
-	{
-		Port.RestoreChannelMask();
-	}
+	RestoreChannelMasksIfIdle();
 }
 
 bool UOscuMIDISubsystem::ApplyLearn(const FName Device, const FOscuMIDIMessage& Message)
@@ -1015,6 +1051,28 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 		return 0;
 	}
 
+	// The player menu's Learn claims the message first, in every build. Same rule as
+	// the editor's: a note counts on press, any controller movement will do.
+	if (PlayerCapture && (!bIsNote || Message.bNoteOn))
+	{
+		FOscuMIDICapture Capture;
+		Capture.Device = Device;
+		Capture.Type = Message.Type;
+		Capture.Channel = Message.Channel;
+		Capture.Number = Message.Number;
+
+		TFunction<void(const FOscuMIDICapture&)> Callback = MoveTemp(PlayerCapture);
+		PlayerCapture.Reset();
+		RestoreChannelMasksIfIdle();
+
+		UE_LOG(LogOSCulator, Log, TEXT("MIDI: captured channel %d %s %d for the player menu."),
+			Capture.Channel,
+			bIsNote ? TEXT("note") : (Message.Type == EOscuMIDIInputType::ProgramChange ? TEXT("program") : TEXT("CC")),
+			Capture.Number);
+		Callback(Capture);
+		return 0;
+	}
+
 #if WITH_EDITOR
 	// Learn claims the message before anything else looks at it. A note only counts on
 	// press -- releasing a pad is not the note you meant -- but any controller movement
@@ -1172,4 +1230,252 @@ int32 UOscuMIDISubsystem::IngestMessage(const FName Device, const FOscuMIDIMessa
 		++MessagesDispatched;
 	}
 	return Calls;
+}
+
+// ---- Player menu ----
+
+void UOscuMIDISubsystem::ArmCapture(TFunction<void(const FOscuMIDICapture&)> OnCaptured)
+{
+	PlayerCapture = MoveTemp(OnCaptured);
+	if (PlayerCapture)
+	{
+		for (FOscuMIDIPort& Port : Ports)
+		{
+			Port.SetChannelMask(0xFFFF);
+		}
+	}
+	else
+	{
+		RestoreChannelMasksIfIdle();
+	}
+}
+
+void UOscuMIDISubsystem::CancelCapture()
+{
+	PlayerCapture.Reset();
+	RestoreChannelMasksIfIdle();
+}
+
+void UOscuMIDISubsystem::RestoreChannelMasksIfIdle()
+{
+	if (PlayerCapture)
+	{
+		return;
+	}
+#if WITH_EDITOR
+	if (LearnMap.IsValid())
+	{
+		return;
+	}
+#endif
+	for (FOscuMIDIPort& Port : Ports)
+	{
+		Port.RestoreChannelMask();
+	}
+}
+
+const FOscuMIDIBinding* UOscuMIDISubsystem::FindProjectBinding(const FName Tag, const FName FunctionName, FName* OutDevice) const
+{
+	for (const TObjectPtr<UOscuMIDIMap>& Map : SourceMaps)
+	{
+		if (Map == nullptr)
+		{
+			continue;
+		}
+
+		for (const FOscuMIDIBinding& Binding : Map->Bindings)
+		{
+			if (Binding.Tag == Tag && Binding.FunctionName == FunctionName)
+			{
+				if (OutDevice != nullptr)
+				{
+					*OutDevice = Binding.Sources.Num() > 0
+						? Binding.Sources[0].ResolveDevice(Map->DefaultDevice)
+						: Map->DefaultDevice;
+				}
+				return &Binding;
+			}
+		}
+	}
+	return nullptr;
+}
+
+void UOscuMIDISubsystem::GetAvailableInputDevices(TArray<FString>& OutNames)
+{
+	OutNames.Reset();
+
+	TArray<FOscuMIDIDeviceInfo> Devices;
+	OscuMIDI::EnumerateDevices(Devices);
+	for (const FOscuMIDIDeviceInfo& Device : Devices)
+	{
+		if (Device.bInput)
+		{
+			OutNames.AddUnique(Device.Name);
+		}
+	}
+}
+
+void UOscuMIDISubsystem::GetAvailableOutputDevices(TArray<FString>& OutNames)
+{
+	OutNames.Reset();
+
+	TArray<FOscuMIDIDeviceInfo> Devices;
+	OscuMIDI::EnumerateDevices(Devices);
+	for (const FOscuMIDIDeviceInfo& Device : Devices)
+	{
+		if (Device.bOutput)
+		{
+			OutNames.AddUnique(Device.Name);
+		}
+	}
+}
+
+namespace
+{
+	EOscuMIDIInputType ToInputType(const EOscuPlayerMIDIKind Kind)
+	{
+		switch (Kind)
+		{
+		case EOscuPlayerMIDIKind::ControlChange: return EOscuMIDIInputType::ControlChange;
+		case EOscuPlayerMIDIKind::ProgramChange: return EOscuMIDIInputType::ProgramChange;
+		default:                                 return EOscuMIDIInputType::Note;
+		}
+	}
+
+	/**
+	 * Gives a binding the player's one input in place of all of its own.
+	 *
+	 * Same rules as the editor's Learn: the kind follows the input, except that a note
+	 * onto a Note Range keeps it a range, moved so the note played is its bottom and
+	 * its width kept.
+	 */
+	void ApplyPlayerInput(FOscuMIDIBinding& Binding, const FOscuPlayerOverride& Override)
+	{
+		const EOscuMIDIInputType Kind = ToInputType(Override.MIDIKind);
+		const int32 MiddleCOctave = UOscuSettings::Get()->MiddleCOctave;
+		const bool bKeepRange = Binding.Type == EOscuMIDIInputType::NoteRange && Kind == EOscuMIDIInputType::Note;
+
+		int32 Span = 12;
+		if (bKeepRange && Binding.Sources.Num() > 0)
+		{
+			Span = Binding.Sources[0].GetNoteHigh() - Binding.Sources[0].GetNoteLow();
+		}
+
+		FOscuMIDISource Source;
+		Source.Device = NAME_None;
+		Source.Channel = static_cast<uint8>(Override.MIDIChannel);
+
+		Binding.Type = bKeepRange ? EOscuMIDIInputType::NoteRange : Kind;
+		Source.Type = Binding.Type;
+
+		switch (Kind)
+		{
+		case EOscuMIDIInputType::Note:
+			Source.Note = OscuMIDINoteName::ToString(static_cast<uint8>(Override.MIDINumber), MiddleCOctave);
+			Source.ResolvedNote = static_cast<uint8>(Override.MIDINumber);
+			if (bKeepRange)
+			{
+				const int32 High = FMath::Min(127, Override.MIDINumber + Span);
+				Source.NoteHigh = OscuMIDINoteName::ToString(static_cast<uint8>(High), MiddleCOctave);
+				Source.ResolvedNoteHigh = static_cast<uint8>(High);
+			}
+			break;
+		case EOscuMIDIInputType::ControlChange:
+			Source.ControlNumber = static_cast<uint8>(Override.MIDINumber);
+			break;
+		default:
+			Source.ProgramNumber = static_cast<uint8>(Override.MIDINumber);
+			break;
+		}
+
+		Binding.Sources.Reset();
+		Binding.Sources.Add(MoveTemp(Source));
+	}
+}
+
+void UOscuMIDISubsystem::RebuildEffectiveMaps()
+{
+	ParamSlotCache.Reset();
+	ActiveMaps = SourceMaps;
+
+	TArray<FOscuPlayerOverride> Remaps = FOscuPlayerMappings::Get().GetActive();
+	Remaps.RemoveAll([](const FOscuPlayerOverride& Override)
+	{
+		return Override.bOutput || !Override.HasMIDI() || Override.MIDIKind == EOscuPlayerMIDIKind::Off;
+	});
+	if (Remaps.Num() == 0)
+	{
+		return;
+	}
+
+	// The remapped bindings move into a map of their own with no Default Device, so the
+	// player's input fires from whichever device they opened. Their value settings come
+	// with them; the original rows are emptied in transient copies of their assets.
+	UOscuMIDIMap* PlayerMap = NewObject<UOscuMIDIMap>(GetTransientPackage(),
+		MakeUniqueObjectName(GetTransientPackage(), UOscuMIDIMap::StaticClass(), TEXT("OSCulatorPlayerRemaps")),
+		RF_Transient);
+
+	TSet<int32> Copied;
+	for (const FOscuPlayerOverride& Override : Remaps)
+	{
+		bool bMoved = false;
+
+		for (int32 MapIndex = 0; MapIndex < ActiveMaps.Num(); ++MapIndex)
+		{
+			UOscuMIDIMap* Map = ActiveMaps[MapIndex];
+			if (Map == nullptr)
+			{
+				continue;
+			}
+
+			for (int32 BindingIndex = 0; BindingIndex < Map->Bindings.Num(); ++BindingIndex)
+			{
+				if (Map->Bindings[BindingIndex].Tag != Override.Tag
+					|| Map->Bindings[BindingIndex].FunctionName != Override.FunctionName)
+				{
+					continue;
+				}
+
+				if (!Copied.Contains(MapIndex))
+				{
+					Map = DuplicateObject<UOscuMIDIMap>(Map, GetTransientPackage(),
+						MakeUniqueObjectName(GetTransientPackage(), UOscuMIDIMap::StaticClass(),
+							*FString::Printf(TEXT("%s_Player"), *Map->GetName())));
+					Map->SetFlags(RF_Transient);
+					ActiveMaps[MapIndex] = Map;
+					Copied.Add(MapIndex);
+				}
+
+				FOscuMIDIBinding& Original = Map->Bindings[BindingIndex];
+				if (!bMoved)
+				{
+					FOscuMIDIBinding Moved = Original;
+					ApplyPlayerInput(Moved, Override);
+					PlayerMap->Bindings.Add(MoveTemp(Moved));
+					bMoved = true;
+				}
+				Original.Sources.Reset();
+			}
+		}
+
+		if (!bMoved)
+		{
+			// Nothing in the project binds it yet: a fresh binding, value 0-1 into the
+			// function's first parameter.
+			FOscuMIDIBinding Added;
+			Added.Tag = Override.Tag;
+			Added.FunctionName = Override.FunctionName;
+			ApplyPlayerInput(Added, Override);
+			PlayerMap->Bindings.Add(MoveTemp(Added));
+		}
+	}
+
+	for (const int32 MapIndex : Copied)
+	{
+		ActiveMaps[MapIndex]->Refresh();
+	}
+	PlayerMap->Refresh();
+	ActiveMaps.Add(PlayerMap);
+
+	UE_LOG(LogOSCulator, Log, TEXT("MIDI: %d player remap(s) in effect."), Remaps.Num());
 }
