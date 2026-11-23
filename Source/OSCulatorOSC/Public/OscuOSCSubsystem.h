@@ -110,6 +110,32 @@ public:
 	uint64 GetMessagesCoalescedAway() const { return MessagesCoalescedAway; }
 	uint64 GetMessagesDispatched() const { return MessagesDispatched; }
 
+	// ---- Player menu ----
+
+	/**
+	 * Hands the address of the next incoming message to OnCaptured instead of routing it.
+	 *
+	 * The player menu's Listen button: move a control and its address becomes the remap,
+	 * so nobody has to know what their controller sends. Control traffic ("/_...") and
+	 * the clock's tempo address are never captured. Arming again replaces the callback.
+	 */
+	void ArmAddressCapture(TFunction<void(const FString&)> OnCaptured);
+	void CancelAddressCapture() { AddressCapture.Reset(); }
+	bool IsCapturingAddress() const { return static_cast<bool>(AddressCapture); }
+
+	/** Player remaps in effect, as player address -> /tag/function. For OSCulator.Status. */
+	const TMap<FString, FString>& GetAddressAliases() const { return AddressAliases; }
+
+	/**
+	 * What the player menu does to one frame's messages, before coalescing: capture,
+	 * then rewrite a remapped address to the function's own, then drop a default address
+	 * whose function the player moved elsewhere. Public for tests.
+	 */
+	void ApplyPlayerRemaps(TArray<FOscuMessage>& InOutMessages);
+
+	/** Re-reads the player's remaps. Called on BeginPlay and whenever they change. */
+	void RebuildAddressRemaps();
+
 private:
 	/**
 	 * Hooked to FWorldDelegates::OnWorldPreActorTick so dispatched calls land
@@ -142,6 +168,15 @@ private:
 
 	FDelegateHandle PreActorTickHandle;
 	FDelegateHandle SettingsChangedHandle;
+	FDelegateHandle PlayerMappingsChangedHandle;
+
+	/** Player address (FOscuPlayerMappings::AliasKey) -> the function's /tag/function. */
+	TMap<FString, FString> AddressAliases;
+
+	/** Default addresses (FOscuPlayerMappings::RoutingKey) the player moved to another address. */
+	TSet<FString> BlockedDefaults;
+
+	TFunction<void(const FString&)> AddressCapture;
 
 	/** Resolved once at BeginPlay rather than per message. */
 	TSet<FString> NoCoalesceAddresses;

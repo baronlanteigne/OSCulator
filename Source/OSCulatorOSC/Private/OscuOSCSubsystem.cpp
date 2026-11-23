@@ -6,6 +6,7 @@
 #include "OscuClockSubsystem.h"
 #include "OscuOSCReceiver.h"
 #include "OscuMarshal.h"
+#include "OscuPlayerMappings.h"
 #include "OscuRouterSubsystem.h"
 #include "OscuSettings.h"
 
@@ -161,6 +162,9 @@ void UOscuOSCSubsystem::Restart()
 
 	OpenReceiver();
 	OpenSenders();
+
+	// Enabling the menu or editing its list changes which remaps apply.
+	RebuildAddressRemaps();
 }
 
 void UOscuOSCSubsystem::OpenSenders()
@@ -340,6 +344,85 @@ void UOscuOSCSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 	// Editing a port or a target should take effect without leaving play.
 	SettingsChangedHandle = UOscuSettings::OnSettingsChanged.AddUObject(this, &UOscuOSCSubsystem::Restart);
+
+	RebuildAddressRemaps();
+	PlayerMappingsChangedHandle = FOscuPlayerMappings::OnChanged.AddUObject(this, &UOscuOSCSubsystem::RebuildAddressRemaps);
+}
+
+void UOscuOSCSubsystem::RebuildAddressRemaps()
+{
+	AddressAliases.Reset();
+	BlockedDefaults.Reset();
+
+	for (const FOscuPlayerOverride& Override : FOscuPlayerMappings::Get().GetActive())
+	{
+		if (Override.bOutput || !Override.HasOSC())
+		{
+			continue;
+		}
+
+		const FString Default = FOscuPlayerMappings::DefaultOSCAddress(Override.Tag, Override.FunctionName);
+		AddressAliases.Add(FOscuPlayerMappings::AliasKey(Override.OSCAddress), Default);
+		BlockedDefaults.Add(FOscuPlayerMappings::RoutingKey(Default));
+	}
+
+	if (AddressAliases.Num() > 0)
+	{
+		UE_LOG(LogOSCulator, Log, TEXT("OSC: %d player remap(s) in effect."), AddressAliases.Num());
+	}
+}
+
+void UOscuOSCSubsystem::ArmAddressCapture(TFunction<void(const FString&)> OnCaptured)
+{
+	AddressCapture = MoveTemp(OnCaptured);
+}
+
+void UOscuOSCSubsystem::ApplyPlayerRemaps(TArray<FOscuMessage>& InOutMessages)
+{
+	FString Captured;
+	bool bCaptured = false;
+
+	for (int32 Index = 0; Index < InOutMessages.Num();)
+	{
+		FOscuMessage& Message = InOutMessages[Index];
+
+		if (AddressCapture && !bCaptured
+			&& !Message.Address.StartsWith(TEXT("/_"))
+			&& !(TempoAddress.Len() > 0 && Message.Address.Equals(TempoAddress, ESearchCase::IgnoreCase)))
+		{
+			Captured = Message.Address;
+			bCaptured = true;
+			InOutMessages.RemoveAt(Index, EAllowShrinking::No);
+			continue;
+		}
+
+		if (AddressAliases.Num() > 0)
+		{
+			if (const FString* Target = AddressAliases.Find(FOscuPlayerMappings::AliasKey(Message.Address)))
+			{
+				Message.Address = *Target;
+				++Index;
+				continue;
+			}
+		}
+
+		if (BlockedDefaults.Num() > 0 && BlockedDefaults.Contains(FOscuPlayerMappings::RoutingKey(Message.Address)))
+		{
+			InOutMessages.RemoveAt(Index, EAllowShrinking::No);
+			continue;
+		}
+
+		++Index;
+	}
+
+	// After the loop: the callback usually stores a remap, which rebuilds the tables above.
+	if (bCaptured)
+	{
+		TFunction<void(const FString&)> Callback = MoveTemp(AddressCapture);
+		AddressCapture.Reset();
+		UE_LOG(LogOSCulator, Log, TEXT("OSC: captured '%s' for the player menu."), *Captured);
+		Callback(Captured);
+	}
 }
 
 void UOscuOSCSubsystem::OpenReceiver()
@@ -384,6 +467,13 @@ void UOscuOSCSubsystem::Deinitialize()
 		UOscuSettings::OnSettingsChanged.Remove(SettingsChangedHandle);
 		SettingsChangedHandle.Reset();
 	}
+
+	if (PlayerMappingsChangedHandle.IsValid())
+	{
+		FOscuPlayerMappings::OnChanged.Remove(PlayerMappingsChangedHandle);
+		PlayerMappingsChangedHandle.Reset();
+	}
+	AddressCapture.Reset();
 
 	bRestartPending = false;
 
@@ -476,6 +566,11 @@ void UOscuOSCSubsystem::Drain()
 	if (Router == nullptr)
 	{
 		return;
+	}
+
+	if (AddressCapture || AddressAliases.Num() > 0)
+	{
+		ApplyPlayerRemaps(Batch);
 	}
 
 	const int32 BeforeCoalescing = Batch.Num();

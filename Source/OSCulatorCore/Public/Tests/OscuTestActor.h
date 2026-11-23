@@ -28,6 +28,10 @@ enum class EOscuTestMode : uint8
 	Sweep
 };
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOscuTestHit, float, Strength);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOscuTestScored, FName, Player, int32, Points);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOscuTestPing);
+
 UCLASS(NotBlueprintable, NotPlaceable, Hidden)
 class AOscuTestActor : public AActor
 {
@@ -119,6 +123,17 @@ public:
 	 */
 	UFUNCTION()
 	void ExecuteUbergraph_OscuTestActor(int32 EntryPoint);
+
+	// ---- Event dispatchers, for event outputs ----
+
+	UPROPERTY(BlueprintAssignable)
+	FOscuTestHit OnHit;
+
+	UPROPERTY(BlueprintAssignable)
+	FOscuTestScored OnScored;
+
+	UPROPERTY(BlueprintAssignable)
+	FOscuTestPing OnPing;
 
 	// ---- What the last call was handed ----
 

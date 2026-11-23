@@ -63,7 +63,7 @@ namespace OscuMIDIRangeTest
 		{
 			if (MIDI != nullptr)
 			{
-				Saved = MIDI->GetActiveMaps();
+				Saved = MIDI->GetSourceMaps();
 				MIDI->SetActiveMap(Map);
 			}
 		}

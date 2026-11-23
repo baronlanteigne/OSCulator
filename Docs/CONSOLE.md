@@ -165,6 +165,33 @@ Off by default. Leave it off during a show.
 
 ---
 
+## Player menu
+
+Needs **Player Menu → Enable Player Menu** in Project Settings. See SETUP.md §6c.
+
+### `OSCulator.PlayerMenu`
+
+Opens or closes the player menu, same as its key.
+
+### `OSCulator.PlayerMenu.List`
+
+What the player has remapped, and whether it is saved or session-only:
+
+```
+Player menu: 2 remap(s) stored, 2 in effect. Saved in .../Saved/OSCulator/PlayerMappings.json.
+  /autocam/OrbitY   OSC /1/fader1   MIDI default
+  /enviro/TimeOfDay   OSC default   MIDI ch 1 CC 21
+```
+
+*Stored* counts what is in memory. *In effect* drops anything the menu no longer lists
+or no longer allows in that column.
+
+### `OSCulator.PlayerMenu.Reset`
+
+Every remap back to the project's mapping. Same as the menu's **Reset all**.
+
+---
+
 ## MIDI
 
 ### `OSCulator.MIDIDevices` — editor too

@@ -1,6 +1,6 @@
 # OSCulator — Build Status
 
-**As of 2026-11-09. All seven phases built, plus the editor panel. 77 automation tests green.**
+**As of 2026-11-21. All seven phases built, plus the editor panel, the player menu and event outputs. 83 automation tests green.**
 
 Run the suite headless:
 
@@ -138,6 +138,54 @@ through the stock property list.
 
 ---
 
+### Player menu
+
+`OSCulatorPlayerMenu`, a **Runtime** module: an in-game Slate menu, opened by a corner
+button, a key (an input preprocessor, so it ignores the project's own input setup) or
+Blueprint. The creator lists the controls in Project Settings, with a Tag / Function
+picker read from the open level. The player changes the OSC port, the MIDI devices, and
+per control the OSC address (typed, or **Listen**) and the MIDI input (**Learn**, which
+works in a packaged build).
+
+Remaps never edit the project. OSC rewrites the player's address to `/<tag>/<function>`
+on arrival and drops the default one. MIDI dispatches from transient copies of the map
+assets, with remapped bindings moved into one extra map with no device, so a learned
+input fires from any device. Saved to `Saved/OSCulator/PlayerMappings.json`; the port and
+devices go to `OSCulator.ini`. In the editor both are session-only unless *Save Changes
+Made In PIE* is on.
+
+`OscuMIDIPort.h` moved to `Public/`, which closes the known gap about
+`OscuMIDISubsystem.h` including a private header.
+
+*Tests:* address keys, the OSC rewrite / drop / Listen, MIDI remap with value settings
+carried over, a remap for a function no map binds, the menu's OSC / MIDI ticks being
+honoured, and capture.
+
+*Not yet verified by hand:* the menu in a packaged build, Listen against TouchOSC, Learn
+against hardware.
+
+### Event outputs
+
+Event dispatchers on tagged actors send OSC and/or MIDI when called, configured under
+*Event Outputs* and re-pointable from the player menu (OSC address; MIDI typed as
+`cc 21` / `note C3` / `off`, or learned from the pad that should receive it; OSC out
+host and port; MIDI out devices). Lives in `OSCulatorPlayerMenu` because it needs both
+transports, but runs with the menu off.
+
+Binding a dispatcher of any signature: `UOscuEventListener` binds a parameterless
+`OnEvent` and catches it in `ProcessEvent`, where the engine passes the dispatcher's
+parameter block as is; the dispatcher's `SignatureFunction` describes it. Nothing
+generated per signature.
+
+*Tests:* binding (skipping missing dispatchers and other tags), argument encoding, MIDI
+scaling, a trigger, a player remap of address and message, `off`, the test send, no
+double binding on rebind, the MIDI text parser.
+
+*Not yet verified by hand:* sends against a real receiver and real MIDI hardware;
+dispatchers on Blueprint (not native) actors.
+
+---
+
 ## Verified by hand
 
 - Blueprint class registers; parameters classify correctly (`vec3, name, float` → 5 args)
@@ -217,16 +265,6 @@ key plus a pressure has the same identity-and-magnitude shape a note does. Pitch
 and channel aftertouch are value-only — no number to filter on, the channel is the
 selector — but both are 14-bit, and `FOscuMIDIMessage::Value` is documented `0-127` with
 `ShapeValue` clamping to it.
-
-### `OscuMIDISubsystem.h` is public but includes a private header
-
-`Public/OscuMIDISubsystem.h` includes `Private/OscuMIDIPort.h`, so the public header does
-not compile from outside its own module. `OSCulatorEditor` hit this and routed around it
-— Learn goes through `UOscuMIDIMap::UpdateLearnArming` instead — but anything later that
-needs the subsystem from outside will hit it again, a MIDI activity monitor first.
-
-Fix is to move `OscuMIDIPort.h` to `Public/`, or forward-declare `FOscuMIDIPort` and move
-`GetPorts()` out of the header.
 
 ---
 

@@ -75,7 +75,7 @@ namespace OscuMIDITest
 		{
 			if (MIDI != nullptr)
 			{
-				Saved = MIDI->GetActiveMaps();
+				Saved = MIDI->GetSourceMaps();
 				MIDI->SetActiveMap(Map);
 			}
 		}
@@ -84,7 +84,7 @@ namespace OscuMIDITest
 		{
 			if (MIDI != nullptr)
 			{
-				Saved = MIDI->GetActiveMaps();
+				Saved = MIDI->GetSourceMaps();
 
 				TArray<TObjectPtr<UOscuMIDIMap>> Live;
 				for (UOscuMIDIMap* Map : Maps)
